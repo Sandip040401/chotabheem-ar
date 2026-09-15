@@ -1,0 +1,22 @@
+.viewfinder {
+  position: relative;
+}
+
+.vf-corner {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--line-strong);
+  opacity: 0.7;
+  transition: border-color 220ms ease, opacity 220ms ease;
+}
+
+.vf-tl { top: -1px; left: -1px; border-right: none; border-bottom: none; }
+.vf-tr { top: -1px; right: -1px; border-left: none; border-bottom: none; }
+.vf-bl { bottom: -1px; left: -1px; border-right: none; border-top: none; }
+.vf-br { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+
+.viewfinder--active .vf-corner {
+  border-color: var(--accent);
+  opacity: 1;
+}

@@ -1,0 +1,27 @@
+{
+  "name": "chotabheem-ar",
+  "description": "Chhota Bheem AR Web Application",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@react-three/drei": "^9.111.4",
+    "@react-three/fiber": "^8.17.6",
+    "@tailwindcss/vite": "^4.3.3",
+    "lucide-react": "^0.479.0",
+    "mind-ar": "^1.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^4.3.3",
+    "three": "0.160.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.1"
+  }
+}
