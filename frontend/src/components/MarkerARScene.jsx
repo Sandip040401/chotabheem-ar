@@ -109,9 +109,6 @@ export default function MarkerARScene({ onExit }) {
         dirLight.shadow.camera.left     = -2
         dirLight.shadow.camera.right    = 2
         dirLight.shadow.camera.top      = 2
-        dirLight.shadow.camera.bottom   = -2
-        scene.add(dirLight)
-
         const fillLight = new THREE.DirectionalLight(0x80aaff, 0.4)
         fillLight.position.set(-2, -1, -1)
         scene.add(fillLight)
@@ -119,14 +116,22 @@ export default function MarkerARScene({ onExit }) {
         // ── 3. Anchor to image target index 0 ─────────────────────
         const anchor = mindarThree.addAnchor(0)
 
-        // Shadow catcher plane on the card surface
+        // Container that aligns MindAR marker space with standard 3D floor space:
+        // By default MindAR puts the card in XY plane (normal = +Z).
+        // Rotating Math.PI / 2 around X maps +Z to +Y (vertical UP from floor),
+        // making the card surface the horizontal XZ floor plane.
+        const markerRoot = new THREE.Group()
+        markerRoot.rotation.x = Math.PI / 2
+        anchor.group.add(markerRoot)
+
+        // Shadow catcher plane on the card / floor surface (XZ plane at y = 0)
         const shadowPlane = new THREE.Mesh(
           new THREE.PlaneGeometry(4, 4),
           new THREE.ShadowMaterial({ transparent: true, opacity: 0.3 })
         )
         shadowPlane.rotation.x = -Math.PI / 2
         shadowPlane.receiveShadow = true
-        anchor.group.add(shadowPlane)
+        markerRoot.add(shadowPlane)
 
         // Spinning glow ring on card surface
         const ringMesh = new THREE.Mesh(
@@ -140,7 +145,13 @@ export default function MarkerARScene({ onExit }) {
         )
         ringMesh.rotation.x = -Math.PI / 2
         ringMesh.position.y = 0.001
-        anchor.group.add(ringMesh)
+        markerRoot.add(ringMesh)
+
+        // Directional sunlight shining from above the floor onto the elephant
+        dirLight.position.set(1, 3, 2)
+        dirLight.target.position.set(0, 0, 0)
+        markerRoot.add(dirLight)
+        markerRoot.add(dirLight.target)
 
         // ── 4. Load Elephant GLB (fully local) ────────────────────
         setLoadingMsg('Loading elephant model...')
@@ -179,7 +190,7 @@ export default function MarkerARScene({ onExit }) {
 
           elephantGroup = new THREE.Group()
           elephantGroup.add(elScene)
-          anchor.group.add(elephantGroup)
+          markerRoot.add(elephantGroup)
 
           // Strip root-bone motion to prevent root sliding
           const clips = stripRootMotion(gltf.animations)
@@ -198,7 +209,7 @@ export default function MarkerARScene({ onExit }) {
           fallback.position.y = 0.06
           elephantGroup = new THREE.Group()
           elephantGroup.add(fallback)
-          anchor.group.add(elephantGroup)
+          markerRoot.add(elephantGroup)
         }
 
         // ── 5. Tracking callbacks ──────────────────────────────────
