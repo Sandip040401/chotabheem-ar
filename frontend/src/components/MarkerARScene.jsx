@@ -84,15 +84,35 @@ export default function MarkerARScene({ onExit }) {
 
         const { renderer, scene, camera } = mindarThree
 
-        // ── 2. Lighting ────────────────────────────────────────────
-        scene.add(new THREE.AmbientLight(0xffffff, 1.2))
+        // ── Renderer quality ──────────────────────────────────────────────
+        // Use device's native pixel density (Retina / AMOLED screens)
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 3))
+        // Cinematic tone mapping — makes 3D lighting look much more realistic
+        renderer.toneMapping        = THREE.ACESFilmicToneMapping
+        renderer.toneMappingExposure = 1.0
+        // Correct colour space for PBR materials
+        renderer.outputColorSpace    = THREE.SRGBColorSpace
+        // Enable shadows for the shadow-catcher plane
+        renderer.shadowMap.enabled = true
+        renderer.shadowMap.type    = THREE.PCFSoftShadowMap
 
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.8)
+        // ── 2. Lighting ────────────────────────────────────────────
+        scene.add(new THREE.AmbientLight(0xffffff, 1.0))
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2.0)
         dirLight.position.set(1, 3, 2)
-        dirLight.castShadow = true
+        dirLight.castShadow             = true
+        dirLight.shadow.mapSize.width   = 2048
+        dirLight.shadow.mapSize.height  = 2048
+        dirLight.shadow.camera.near     = 0.01
+        dirLight.shadow.camera.far      = 10
+        dirLight.shadow.camera.left     = -2
+        dirLight.shadow.camera.right    = 2
+        dirLight.shadow.camera.top      = 2
+        dirLight.shadow.camera.bottom   = -2
         scene.add(dirLight)
 
-        const fillLight = new THREE.DirectionalLight(0x80ccff, 0.5)
+        const fillLight = new THREE.DirectionalLight(0x80aaff, 0.4)
         fillLight.position.set(-2, -1, -1)
         scene.add(fillLight)
 
@@ -185,10 +205,38 @@ export default function MarkerARScene({ onExit }) {
         anchor.onTargetFound = () => { if (!stopped) setTrackingState('found') }
         anchor.onTargetLost  = () => { if (!stopped) setTrackingState('lost')  }
 
-        // ── 6. Start MindAR (requests camera) ─────────────────────
+        // ── 6. Start MindAR (opens camera + begins tracking) ────────────
         setLoadingMsg('Starting camera...')
         await mindarThree.start()
         if (stopped) { mindarThree.stop(); return }
+
+        // ── Upgrade camera to maximum available resolution ──────────────
+        // MindAR opens the camera at its default (often 640×480).
+        // After start(), we can push the video track to its max capability.
+        // Tracking continues at MindAR's internal downscaled resolution;
+        // the higher-res stream makes the camera PREVIEW sharper.
+        try {
+          const video = mindarThree.video
+          if (video?.srcObject) {
+            const track = video.srcObject.getVideoTracks()[0]
+            if (track) {
+              const cap = track.getCapabilities?.() ?? {}
+              await track.applyConstraints({
+                width:  { ideal: cap.width?.max  ?? 3840 },
+                height: { ideal: cap.height?.max ?? 2160 },
+                // Continuous autofocus (essential at 3-8m)
+                ...(cap.focusMode?.includes('continuous') && {
+                  focusMode: 'continuous',
+                }),
+              })
+              const s = track.getSettings()
+              console.info(`[MarkerAR] Camera: ${s.width}×${s.height}, facing: ${s.facingMode}`)
+            }
+          }
+        } catch (camErr) {
+          // applyConstraints not supported on all browsers — safe to ignore
+          console.warn('[MarkerAR] Camera upgrade skipped:', camErr.message)
+        }
 
         setIsStarting(false)
         setTrackingState('searching')
