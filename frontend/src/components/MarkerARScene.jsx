@@ -59,6 +59,7 @@ export default function MarkerARScene({ onExit }) {
   const elephantGroupRef = useRef(null)
   const elSceneRef       = useRef(null)
   const footYRef         = useRef(0)
+  const lostTimeoutRef   = useRef(null)
 
   // Sync ref with state
   useEffect(() => {
@@ -82,14 +83,11 @@ export default function MarkerARScene({ onExit }) {
           imageTargetSrc: 'assets/targets.mind',
           uiScanning:     false,
           uiLoading:      false,
-          // ── Rock-solid smoothing filter (eliminates shaking & jitter) ──
-          // filterMinCF: very low cutoff eliminates micro-jitter when stationary
-          // filterBeta: low velocity weight prevents erratic twitching on camera noise
+          // Low cutoff + beta to heavily suppress sensor noise
           filterMinCF:       0.0001,
-          filterBeta:        0.01,
-          // Keep tracking locked smoothly across momentary frame drops (avoids restarts)
-          warmupTolerance:   3,
-          missTolerance:     35,
+          filterBeta:        0.001,
+          warmupTolerance:   2,
+          missTolerance:     45,
           maxTrack:          1,
         })
         mindARRef.current = mindarThree
@@ -112,18 +110,22 @@ export default function MarkerARScene({ onExit }) {
         fillLight.position.set(-2, 2, -1)
         scene.add(fillLight)
 
-        // ── 3. Anchor to image target index 0 ─────────────────────
+        // ── 3. Anchor & Visual Display Hierarchy ──────────────────
+        // anchor: raw MindAR tracking sensor
         const anchor = mindarThree.addAnchor(0)
 
-        // Container that aligns MindAR marker space with standard 3D floor space:
-        // By default MindAR puts the card in XY plane (normal = +Z).
-        // Rotating Math.PI / 2 around X maps +Z to +Y (vertical UP from floor),
-        // making the card surface the horizontal XZ floor plane.
+        // displayRoot: decoupled scene-level container with LERP/SLERP dampening
+        // This ensures the elephant NEVER vibrates and NEVER blinks out when tracking flickers!
+        const displayRoot = new THREE.Group()
+        displayRoot.visible = false
+        scene.add(displayRoot)
+
+        // markerRoot inside displayRoot: rotates 90° so +Y is up from the floor
         const markerRoot = new THREE.Group()
         markerRoot.rotation.x = Math.PI / 2
-        anchor.group.add(markerRoot)
+        displayRoot.add(markerRoot)
 
-        // Shadow catcher plane glued right on the card / floor surface (y = 0.0005)
+        // Shadow catcher plane glued on the floor surface (y = 0.0005)
         const shadowPlane = new THREE.Mesh(
           new THREE.PlaneGeometry(3, 3),
           new THREE.ShadowMaterial({ transparent: true, opacity: 0.45 })
@@ -226,16 +228,27 @@ export default function MarkerARScene({ onExit }) {
           elephantGroupRef.current = elephantGroup
         }
 
-        // ── 5. Tracking callbacks ──────────────────────────────────
-        anchor.onTargetFound = () => { if (!stopped) setTrackingState('found') }
-        anchor.onTargetLost  = () => { if (!stopped) setTrackingState('lost')  }
+        // ── 5. Tracking callbacks (debounced to prevent UI flashing) ──
+        anchor.onTargetFound = () => {
+          if (stopped) return
+          if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
+          setTrackingState('found')
+        }
+        anchor.onTargetLost = () => {
+          if (stopped) return
+          // Hold "found" for 1.5s through momentary sensor drops / screen reflections
+          if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
+          lostTimeoutRef.current = setTimeout(() => {
+            if (!stopped) setTrackingState('lost')
+          }, 1500)
+        }
 
         // ── 6. Start MindAR (opens camera + begins tracking) ────────────
         setLoadingMsg('Starting camera...')
         await mindarThree.start()
         if (stopped) { mindarThree.stop(); return }
 
-        // Enable continuous autofocus if supported, without disrupting video stream
+        // Enable continuous autofocus if supported
         try {
           const video = mindarThree.video
           if (video?.srcObject) {
@@ -254,19 +267,58 @@ export default function MarkerARScene({ onExit }) {
         setIsStarting(false)
         setTrackingState('searching')
 
-        // ── 7. Render loop ─────────────────────────────────────────
-        const clock = new THREE.Clock()
+        // ── 7. Render loop with anti-jitter filter & persistence latch ──
+        const clock           = new THREE.Clock()
+        const targetWorldPos  = new THREE.Vector3()
+        const targetWorldQuat = new THREE.Quaternion()
+        const smoothedPos     = new THREE.Vector3()
+        const smoothedQuat    = new THREE.Quaternion()
+        let hasLockedPose     = false
+        let lastSeenTime      = 0
+
         renderer.setAnimationLoop(() => {
           const delta = Math.min(clock.getDelta(), 0.033)
+          const now   = clock.getElapsedTime()
+
+          if (anchor.group.visible) {
+            lastSeenTime = now
+            anchor.group.getWorldPosition(targetWorldPos)
+            anchor.group.getWorldQuaternion(targetWorldQuat)
+
+            if (!hasLockedPose) {
+              // First frame detection: snap instantly
+              smoothedPos.copy(targetWorldPos)
+              smoothedQuat.copy(targetWorldQuat)
+              hasLockedPose = true
+            } else {
+              // Dual-rate dampening:
+              // For micro-movements (< 3cm jitter), damp heavily to eliminate vibration completely
+              // For camera movements, follow smoothly
+              const dist = smoothedPos.distanceTo(targetWorldPos)
+              const factor = dist > 0.05 ? 0.22 : 0.10
+              smoothedPos.lerp(targetWorldPos, factor)
+              smoothedQuat.slerp(targetWorldQuat, factor)
+            }
+
+            displayRoot.position.copy(smoothedPos)
+            displayRoot.quaternion.copy(smoothedQuat)
+            displayRoot.visible = true
+          } else {
+            // Persistence latch: keep elephant standing steady for 3.0 seconds
+            // through camera wobbles, screen glare, or partial occlusions
+            if (hasLockedPose && (now - lastSeenTime < 3.0)) {
+              displayRoot.visible = true
+            } else if (hasLockedPose) {
+              displayRoot.visible = false
+              hasLockedPose = false
+            }
+          }
 
           // Keep elephant glued to (0, 0, 0) with user's desired scale and rotation
           if (elSceneRef.current && elephantGroupRef.current) {
             const currentScale = modelScaleRef.current
             elSceneRef.current.scale.setScalar(currentScale)
-            // Keep bottom of feet locked to card surface y = 0
             elSceneRef.current.position.y = -footYRef.current * currentScale
-
-            // User orientation
             elephantGroupRef.current.rotation.y = modelRotationRef.current
           }
 
@@ -297,6 +349,7 @@ export default function MarkerARScene({ onExit }) {
 
     return () => {
       stopped = true
+      if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
       try {
         if (mindARRef.current) {
           mindARRef.current.renderer?.setAnimationLoop(null)
