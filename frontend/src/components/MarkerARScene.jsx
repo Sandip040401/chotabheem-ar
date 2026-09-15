@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MindARThree } from 'mind-ar/dist/mindar-image-three.prod.js'
+import { ZoomIn, ZoomOut, RotateCcw, RotateCw } from 'lucide-react'
 
 /**
  * MarkerARScene — NatGeo-style marker-based AR
@@ -26,13 +27,9 @@ const ROOT_BONES = ['elep_4_Root_M', 'elep_4_RootPart1_M']
 // ─────────────────────────────────────────────────────────────
 // TUNING CONSTANTS
 // MindAR units: 1.0 = physical width of the printed marker
-// e.g. if marker is A4 (21cm wide), SCALE=0.3 makes elephant ~6cm tall
-// Increase SCALE for larger prints or longer viewing distances
+// Default scale: 0.35 fits comfortably inside standard marker card
 // ─────────────────────────────────────────────────────────────
-const ELEPHANT_SCALE   = 0.30   // size of elephant relative to marker width
-const ORBIT_RADIUS     = 0.55   // how far elephant walks from marker centre
-const ORBIT_SPEED      = 0.40   // walking speed (radians per second)
-
+const DEFAULT_SCALE = 0.35
 
 function stripRootMotion(animations) {
   return animations.map(clip => {
@@ -54,13 +51,30 @@ export default function MarkerARScene({ onExit }) {
   const [isStarting,   setIsStarting]     = useState(true)
   const [loadingMsg,   setLoadingMsg]     = useState('Initialising AR...')
   const [errorMsg,     setErrorMsg]       = useState(null)
+  const [modelScale,   setModelScale]     = useState(DEFAULT_SCALE)
+  const [modelRotation, setModelRotation] = useState(0)
+
+  const modelScaleRef    = useRef(DEFAULT_SCALE)
+  const modelRotationRef = useRef(0)
+  const elephantGroupRef = useRef(null)
+  const elSceneRef       = useRef(null)
+  const footYRef         = useRef(0)
+
+  // Sync ref with state
+  useEffect(() => {
+    modelScaleRef.current = modelScale
+  }, [modelScale])
+
+  useEffect(() => {
+    modelRotationRef.current = modelRotation
+  }, [modelRotation])
 
   useEffect(() => {
     let stopped = false
 
     async function startAR() {
       try {
-        // ── 1. Create MindAR instance ──────────────────────────────
+        // ── 1. Create MindAR instance with high-stability smoothing ─
         setLoadingMsg('Preparing marker tracking...')
 
         const mindarThree = new MindARThree({
@@ -68,15 +82,14 @@ export default function MarkerARScene({ onExit }) {
           imageTargetSrc: 'assets/targets.mind',
           uiScanning:     false,
           uiLoading:      false,
-          // ── Long-distance tracking optimisations ──
-          // Smoothing filter: lower filterMinCF = smoother tracking at distance
-          // (reduces jitter when marker is small in frame)
-          filterMinCF:       0.001,
-          filterBeta:        1000,
-          // Keep tracking lock for longer when marker partially hidden
-          warmupTolerance:   5,    // frames before tracking is considered stable
-          missTolerance:     10,   // frames before tracking is considered lost
-          // Track only 1 target at a time (faster, uses less CPU)
+          // ── Rock-solid smoothing filter (eliminates shaking & jitter) ──
+          // filterMinCF: very low cutoff eliminates micro-jitter when stationary
+          // filterBeta: low velocity weight prevents erratic twitching on camera noise
+          filterMinCF:       0.0001,
+          filterBeta:        0.01,
+          // Keep tracking locked smoothly across momentary frame drops (avoids restarts)
+          warmupTolerance:   3,
+          missTolerance:     35,
           maxTrack:          1,
         })
         mindARRef.current = mindarThree
@@ -85,32 +98,18 @@ export default function MarkerARScene({ onExit }) {
         const { renderer, scene, camera } = mindarThree
 
         // ── Renderer quality ──────────────────────────────────────────────
-        // Use device's native pixel density (Retina / AMOLED screens)
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 3))
-        // Cinematic tone mapping — makes 3D lighting look much more realistic
-        renderer.toneMapping        = THREE.ACESFilmicToneMapping
-        renderer.toneMappingExposure = 1.0
-        // Correct colour space for PBR materials
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.5))
+        renderer.toneMapping         = THREE.ACESFilmicToneMapping
+        renderer.toneMappingExposure = 1.1
         renderer.outputColorSpace    = THREE.SRGBColorSpace
-        // Enable shadows for the shadow-catcher plane
-        renderer.shadowMap.enabled = true
-        renderer.shadowMap.type    = THREE.PCFSoftShadowMap
+        renderer.shadowMap.enabled   = true
+        renderer.shadowMap.type      = THREE.PCFSoftShadowMap
 
         // ── 2. Lighting ────────────────────────────────────────────
-        scene.add(new THREE.AmbientLight(0xffffff, 1.0))
+        scene.add(new THREE.AmbientLight(0xffffff, 1.2))
 
-        const dirLight = new THREE.DirectionalLight(0xffffff, 2.0)
-        dirLight.position.set(1, 3, 2)
-        dirLight.castShadow             = true
-        dirLight.shadow.mapSize.width   = 2048
-        dirLight.shadow.mapSize.height  = 2048
-        dirLight.shadow.camera.near     = 0.01
-        dirLight.shadow.camera.far      = 10
-        dirLight.shadow.camera.left     = -2
-        dirLight.shadow.camera.right    = 2
-        dirLight.shadow.camera.top      = 2
-        const fillLight = new THREE.DirectionalLight(0x80aaff, 0.4)
-        fillLight.position.set(-2, -1, -1)
+        const fillLight = new THREE.DirectionalLight(0x80aaff, 0.5)
+        fillLight.position.set(-2, 2, -1)
         scene.add(fillLight)
 
         // ── 3. Anchor to image target index 0 ─────────────────────
@@ -124,23 +123,24 @@ export default function MarkerARScene({ onExit }) {
         markerRoot.rotation.x = Math.PI / 2
         anchor.group.add(markerRoot)
 
-        // Shadow catcher plane on the card / floor surface (XZ plane at y = 0)
+        // Shadow catcher plane glued right on the card / floor surface (y = 0.0005)
         const shadowPlane = new THREE.Mesh(
-          new THREE.PlaneGeometry(4, 4),
-          new THREE.ShadowMaterial({ transparent: true, opacity: 0.3 })
+          new THREE.PlaneGeometry(3, 3),
+          new THREE.ShadowMaterial({ transparent: true, opacity: 0.45 })
         )
         shadowPlane.rotation.x = -Math.PI / 2
+        shadowPlane.position.y = 0.0005
         shadowPlane.receiveShadow = true
         markerRoot.add(shadowPlane)
 
-        // Spinning glow ring on card surface
+        // Gravity ring visual on the marker surface under the feet
         const ringMesh = new THREE.Mesh(
-          new THREE.RingGeometry(0.06, 0.14, 48),
+          new THREE.RingGeometry(0.16, 0.22, 64),
           new THREE.MeshBasicMaterial({
             color: 0xffcc00,
             side: THREE.DoubleSide,
             transparent: true,
-            opacity: 0.8,
+            opacity: 0.6,
           })
         )
         ringMesh.rotation.x = -Math.PI / 2
@@ -148,7 +148,17 @@ export default function MarkerARScene({ onExit }) {
         markerRoot.add(ringMesh)
 
         // Directional sunlight shining from above the floor onto the elephant
-        dirLight.position.set(1, 3, 2)
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2.2)
+        dirLight.position.set(0.8, 2.5, 1.2)
+        dirLight.castShadow            = true
+        dirLight.shadow.mapSize.width  = 2048
+        dirLight.shadow.mapSize.height = 2048
+        dirLight.shadow.camera.near    = 0.05
+        dirLight.shadow.camera.far     = 6
+        dirLight.shadow.camera.left    = -1
+        dirLight.shadow.camera.right   = 1
+        dirLight.shadow.camera.top     = 1
+        dirLight.shadow.camera.bottom  = -1
         dirLight.target.position.set(0, 0, 0)
         markerRoot.add(dirLight)
         markerRoot.add(dirLight.target)
@@ -157,7 +167,6 @@ export default function MarkerARScene({ onExit }) {
         setLoadingMsg('Loading elephant model...')
 
         const dracoLoader = new DRACOLoader()
-        // Local DRACO decoder — no CDN
         dracoLoader.setDecoderPath('vendor/draco/')
 
         const loader = new GLTFLoader()
@@ -165,17 +174,18 @@ export default function MarkerARScene({ onExit }) {
 
         let elephantGroup = null
         let mixer         = null
-        const orbit = { angle: 0, radius: ORBIT_RADIUS, speed: ORBIT_SPEED }
 
         try {
           const gltf = await loader.loadAsync('assets/Elephant_Turn_Walk.glb')
           if (stopped) return
 
           const elScene = gltf.scene
+          elSceneRef.current = elScene
 
-          // Find foot Y offset so elephant stands on the card
+          // Find exact foot Y offset so feet are glued precisely to y=0 (marker surface)
           const box = new THREE.Box3().setFromObject(elScene)
           const footY = box.min.y
+          footYRef.current = footY
 
           elScene.traverse(child => {
             if (child.isMesh || child.isSkinnedMesh) {
@@ -184,32 +194,36 @@ export default function MarkerARScene({ onExit }) {
             }
           })
 
-          const SCALE = ELEPHANT_SCALE
-          elScene.scale.setScalar(SCALE)
-          elScene.position.y = -footY * SCALE // lift feet to y=0 (card surface)
+          const initScale = modelScaleRef.current
+          elScene.scale.setScalar(initScale)
+          elScene.position.y = -footY * initScale // Glue feet to marker surface y=0!
 
           elephantGroup = new THREE.Group()
+          elephantGroup.position.set(0, 0, 0) // Centered right on the marker!
           elephantGroup.add(elScene)
           markerRoot.add(elephantGroup)
+          elephantGroupRef.current = elephantGroup
 
-          // Strip root-bone motion to prevent root sliding
+          // Strip root translation to keep animation centered on the marker
           const clips = stripRootMotion(gltf.animations)
           mixer = new THREE.AnimationMixer(elScene)
           if (clips.length > 0) {
             const action = mixer.clipAction(clips[0])
-            action.reset().fadeIn(0.4).setLoop(THREE.LoopRepeat).play()
+            action.reset().fadeIn(0.3).setLoop(THREE.LoopRepeat).play()
+            action.timeScale = 0.95
           }
         } catch (glbErr) {
-          console.warn('GLB load failed, using fallback:', glbErr)
-          // Fallback golden box — confirms tracking works even without GLB
+          console.warn('GLB load failed, using fallback box:', glbErr)
           const fallback = new THREE.Mesh(
-            new THREE.BoxGeometry(0.08, 0.12, 0.08),
+            new THREE.BoxGeometry(0.12, 0.16, 0.12),
             new THREE.MeshStandardMaterial({ color: 0xf59e0b, metalness: 0.4, roughness: 0.3 })
           )
-          fallback.position.y = 0.06
+          fallback.position.y = 0.08
           elephantGroup = new THREE.Group()
+          elephantGroup.position.set(0, 0, 0)
           elephantGroup.add(fallback)
           markerRoot.add(elephantGroup)
+          elephantGroupRef.current = elephantGroup
         }
 
         // ── 5. Tracking callbacks ──────────────────────────────────
@@ -221,32 +235,20 @@ export default function MarkerARScene({ onExit }) {
         await mindarThree.start()
         if (stopped) { mindarThree.stop(); return }
 
-        // ── Upgrade camera to maximum available resolution ──────────────
-        // MindAR opens the camera at its default (often 640×480).
-        // After start(), we can push the video track to its max capability.
-        // Tracking continues at MindAR's internal downscaled resolution;
-        // the higher-res stream makes the camera PREVIEW sharper.
+        // Enable continuous autofocus if supported, without disrupting video stream
         try {
           const video = mindarThree.video
           if (video?.srcObject) {
             const track = video.srcObject.getVideoTracks()[0]
-            if (track) {
-              const cap = track.getCapabilities?.() ?? {}
+            const cap = track?.getCapabilities?.() ?? {}
+            if (cap.focusMode?.includes('continuous')) {
               await track.applyConstraints({
-                width:  { ideal: cap.width?.max  ?? 3840 },
-                height: { ideal: cap.height?.max ?? 2160 },
-                // Continuous autofocus (essential at 3-8m)
-                ...(cap.focusMode?.includes('continuous') && {
-                  focusMode: 'continuous',
-                }),
+                advanced: [{ focusMode: 'continuous' }]
               })
-              const s = track.getSettings()
-              console.info(`[MarkerAR] Camera: ${s.width}×${s.height}, facing: ${s.facingMode}`)
             }
           }
-        } catch (camErr) {
-          // applyConstraints not supported on all browsers — safe to ignore
-          console.warn('[MarkerAR] Camera upgrade skipped:', camErr.message)
+        } catch {
+          // ignore if continuous focus is not supported
         }
 
         setIsStarting(false)
@@ -257,20 +259,19 @@ export default function MarkerARScene({ onExit }) {
         renderer.setAnimationLoop(() => {
           const delta = Math.min(clock.getDelta(), 0.033)
 
-          // Elephant walks in a circle around the marker
-          if (elephantGroup) {
-            orbit.angle += delta * orbit.speed
-            elephantGroup.position.set(
-              Math.cos(orbit.angle) * orbit.radius,
-              0,
-              Math.sin(orbit.angle) * orbit.radius
-            )
-            // Face direction of travel
-            elephantGroup.rotation.y = orbit.angle + Math.PI / 2
+          // Keep elephant glued to (0, 0, 0) with user's desired scale and rotation
+          if (elSceneRef.current && elephantGroupRef.current) {
+            const currentScale = modelScaleRef.current
+            elSceneRef.current.scale.setScalar(currentScale)
+            // Keep bottom of feet locked to card surface y = 0
+            elSceneRef.current.position.y = -footYRef.current * currentScale
+
+            // User orientation
+            elephantGroupRef.current.rotation.y = modelRotationRef.current
           }
 
-          // Spin the glow ring
-          ringMesh.rotation.z += delta * 1.2
+          // Gentle decorative glow pulse on marker surface ring
+          ringMesh.rotation.z += delta * 0.8
 
           if (mixer) mixer.update(delta)
           renderer.render(scene, camera)
@@ -428,7 +429,43 @@ export default function MarkerARScene({ onExit }) {
               : '🔍 SCANNING...'}
           </div>
 
-          <div className="w-16" />
+          {/* Quick scale & rotation controls */}
+          <div className="flex items-center gap-1.5 bg-slate-900/90 border border-white/10 rounded-full px-2 py-1 shadow-lg backdrop-blur-md">
+            <button
+              onClick={() => setModelScale(s => Math.max(0.15, +(s - 0.05).toFixed(2)))}
+              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+              title="Shrink elephant"
+            >
+              <ZoomOut className="w-3 h-3" />
+            </button>
+            <span className="text-[10px] font-mono font-bold text-amber-300 w-8 text-center">
+              {(modelScale * 100).toFixed(0)}%
+            </span>
+            <button
+              onClick={() => setModelScale(s => Math.min(1.0, +(s + 0.05).toFixed(2)))}
+              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+              title="Enlarge elephant"
+            >
+              <ZoomIn className="w-3 h-3" />
+            </button>
+
+            <div className="w-[1px] h-3.5 bg-white/20 mx-0.5" />
+
+            <button
+              onClick={() => setModelRotation(r => r - Math.PI / 6)}
+              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+              title="Turn left 30°"
+            >
+              <RotateCcw className="w-3 h-3" />
+            </button>
+            <button
+              onClick={() => setModelRotation(r => r + Math.PI / 6)}
+              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+              title="Turn right 30°"
+            >
+              <RotateCw className="w-3 h-3" />
+            </button>
+          </div>
         </div>
       )}
 
