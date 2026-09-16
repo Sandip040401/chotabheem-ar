@@ -3,46 +3,83 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MindARThree } from 'mind-ar/dist/mindar-image-three.prod.js'
-import { ZoomIn, ZoomOut, RotateCcw, RotateCw } from 'lucide-react'
+import { RotateCcw, RotateCw } from 'lucide-react'
 
 /**
- * MarkerARScene — NatGeo-style marker-based AR
+ * MarkerARScene — Fixed Real-World Character Sizing
  *
- * 100% local, zero CDN dependencies:
- *  - MindAR: installed via npm (mind-ar package, node_modules)
- *  - Three.js: same npm instance used by the rest of the app
- *  - DRACO decoder: downloaded to public/vendor/draco/
- *  - Elephant GLB: public/assets/Elephant_Turn_Walk.glb
- *  - targets.mind: public/assets/targets.mind (compiled once by user)
+ * Character size is COMPLETELY INDEPENDENT of marker size.
  *
- * How it works:
- *  - MindARThree creates its own WebGLRenderer + video camera feed
- *  - We add lights, shadow plane, elephant to MindAR's anchor.group
- *  - anchor.group is automatically positioned at the detected marker
- *  - Elephant orbits the marker origin every frame
+ * The only values that need calibrating are in AR_CONFIG below.
+ *
+ * Formula:
+ *   MindAR unit scale  = characterHeightMeters / markerWidthMeters
+ *   Final model scale  = (above) / nativeModelHeightUnits
+ *
+ * Example installation:
+ *   Physical marker:  3.0 m wide
+ *   Character:        1.5 m tall
+ *   Camera:           ~8 m away
+ *
+ * Changing markerWidthMeters does NOT change the character height on screen.
+ * If the character looks too large/small relative to a standing person,
+ * adjust characterHeightMeters and re-test.
  */
 
-const ROOT_BONES = ['elep_4_Root_M', 'elep_4_RootPart1_M']
+// ─────────────────────────────────────────────────────────────────────────────
+// AR INSTALLATION CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+const AR_CONFIG = {
+  // ── Physical marker ──────────────────────────────────────────────────────
+  // Actual printed width of the floor marker in metres.
+  markerWidthMeters: 3.0,
 
-// ─────────────────────────────────────────────────────────────
-// TUNING CONSTANTS
-// MindAR units: 1.0 = physical width of the printed marker
-// Default scale: 0.35 fits comfortably inside standard marker card
-// ─────────────────────────────────────────────────────────────
-const DEFAULT_SCALE = 0.35
+  // ── AR character ─────────────────────────────────────────────────────────
+  // Exact desired real-world height of the AR character in metres.
+  characterHeightMeters: 1.5,
+
+  // Base rotation of the character around the vertical axis (Y).
+  // The HUD rotation buttons offset from this value at runtime.
+  characterRotationDegrees: 0,
+
+  // Small Y offset above floor surface to prevent z-fighting.
+  floorOffsetMeters: 0.002,
+
+  // ── Tracking smoothing ───────────────────────────────────────────────────
+  // Lerp/slerp factors per frame. Lower = smoother but more lag.
+  // Micro-movement (< 5 cm) uses half of this to eliminate jitter.
+  positionSmoothing: 0.12,
+  rotationSmoothing: 0.12,
+
+  // How long (seconds) to keep the character visible after marker disappears.
+  trackingHoldSeconds: 1.5,
+
+  // ── Rendering ────────────────────────────────────────────────────────────
+  maxPixelRatio: 2.5,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOT BONE NAMES — root motion stripped so character stays on marker
+// ─────────────────────────────────────────────────────────────────────────────
+const ROOT_BONES = ['elep_4_Root_M', 'elep_4_RootPart1_M']
 
 function stripRootMotion(animations) {
   return animations.map(clip => {
     const cloned = clip.clone()
     cloned.tracks = cloned.tracks.filter(t => {
       const bone = t.name.split('.')[0]
-      return !(ROOT_BONES.includes(bone) &&
-        (t.name.endsWith('.position') || t.name.endsWith('.rotation')))
+      return !(
+        ROOT_BONES.includes(bone) &&
+        (t.name.endsWith('.position') || t.name.endsWith('.rotation'))
+      )
     })
     return cloned
   })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
 export default function MarkerARScene({ onExit }) {
   const containerRef = useRef(null)
   const mindARRef    = useRef(null)
@@ -51,31 +88,30 @@ export default function MarkerARScene({ onExit }) {
   const [isStarting,   setIsStarting]     = useState(true)
   const [loadingMsg,   setLoadingMsg]     = useState('Initialising AR...')
   const [errorMsg,     setErrorMsg]       = useState(null)
-  const [modelScale,   setModelScale]     = useState(DEFAULT_SCALE)
+
+  // Runtime rotation offset that operators can adjust via HUD buttons.
+  // Added on top of AR_CONFIG.characterRotationDegrees every frame.
   const [modelRotation, setModelRotation] = useState(0)
-
-  const modelScaleRef    = useRef(DEFAULT_SCALE)
   const modelRotationRef = useRef(0)
+
+  const elSceneRef      = useRef(null)
   const elephantGroupRef = useRef(null)
-  const elSceneRef       = useRef(null)
-  const footYRef         = useRef(0)
-  const lostTimeoutRef   = useRef(null)
+  const lostTimeoutRef  = useRef(null)
+  const mixerRef        = useRef(null)
 
-  // Sync ref with state
-  useEffect(() => {
-    modelScaleRef.current = modelScale
-  }, [modelScale])
-
+  // Keep rotation ref in sync with state so the render loop reads it without
+  // needing a React re-render on every button press.
   useEffect(() => {
     modelRotationRef.current = modelRotation
   }, [modelRotation])
 
+  // ── Main AR lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
     let stopped = false
 
     async function startAR() {
       try {
-        // ── 1. Create MindAR instance with high-stability smoothing ─
+        // ── 1. Create MindAR instance ────────────────────────────────────
         setLoadingMsg('Preparing marker tracking...')
 
         const mindarThree = new MindARThree({
@@ -83,90 +119,104 @@ export default function MarkerARScene({ onExit }) {
           imageTargetSrc: 'assets/targets.mind',
           uiScanning:     false,
           uiLoading:      false,
-          // Low cutoff + beta to heavily suppress sensor noise
-          filterMinCF:       0.0001,
-          filterBeta:        0.001,
-          warmupTolerance:   2,
-          missTolerance:     45,
-          maxTrack:          1,
+          // Aggressive noise suppression for a fixed-camera installation.
+          filterMinCF:     0.0001,
+          filterBeta:      0.001,
+          warmupTolerance: 2,
+          missTolerance:   45,
+          maxTrack:        1,
         })
+
         mindARRef.current = mindarThree
         if (stopped) return
 
         const { renderer, scene, camera } = mindarThree
 
-        // ── Renderer quality ──────────────────────────────────────────────
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.5))
+        // ── 2. Renderer quality ──────────────────────────────────────────
+        renderer.setPixelRatio(
+          Math.min(window.devicePixelRatio || 1, AR_CONFIG.maxPixelRatio)
+        )
         renderer.toneMapping         = THREE.ACESFilmicToneMapping
         renderer.toneMappingExposure = 1.1
         renderer.outputColorSpace    = THREE.SRGBColorSpace
         renderer.shadowMap.enabled   = true
         renderer.shadowMap.type      = THREE.PCFSoftShadowMap
 
-        // ── 2. Lighting ────────────────────────────────────────────
+        // ── 3. Scene-level ambient + fill ────────────────────────────────
         scene.add(new THREE.AmbientLight(0xffffff, 1.2))
 
         const fillLight = new THREE.DirectionalLight(0x80aaff, 0.5)
         fillLight.position.set(-2, 2, -1)
         scene.add(fillLight)
 
-        // ── 3. Anchor & Visual Display Hierarchy ──────────────────
-        // anchor: raw MindAR tracking sensor
+        // ── 4. MindAR anchor (tracks marker index 0) ─────────────────────
         const anchor = mindarThree.addAnchor(0)
 
-        // displayRoot: decoupled scene-level container with LERP/SLERP dampening
-        // This ensures the elephant NEVER vibrates and NEVER blinks out when tracking flickers!
+        // ── 5. Display hierarchy ─────────────────────────────────────────
+        //
+        // displayRoot  ← positioned by LERP/SLERP each frame (anti-jitter)
+        //   └─ markerRoot  ← rotated +90° around X so +Y is up from the floor
+        //        ├─ shadowPlane
+        //        ├─ ringMesh  (decorative)
+        //        ├─ characterLight + target
+        //        └─ elephantGroup
+        //             └─ elScene  (the GLB model)
+        //
         const displayRoot = new THREE.Group()
         displayRoot.visible = false
         scene.add(displayRoot)
 
-        // markerRoot inside displayRoot: rotates 90° so +Y is up from the floor
+        // Rotate so the marker's horizontal plane becomes the XZ floor.
         const markerRoot = new THREE.Group()
         markerRoot.rotation.x = Math.PI / 2
         displayRoot.add(markerRoot)
 
-        // Shadow catcher plane glued on the floor surface (y = 0.0005)
+        // ── 6. Floor shadow catcher ──────────────────────────────────────
+        // Sized to the physical marker so shadows look grounded correctly.
+        const halfW = AR_CONFIG.markerWidthMeters
         const shadowPlane = new THREE.Mesh(
-          new THREE.PlaneGeometry(3, 3),
-          new THREE.ShadowMaterial({ transparent: true, opacity: 0.45 })
+          new THREE.PlaneGeometry(halfW, halfW),
+          new THREE.ShadowMaterial({ transparent: true, opacity: 0.40 })
         )
         shadowPlane.rotation.x = -Math.PI / 2
-        shadowPlane.position.y = 0.0005
+        shadowPlane.position.y = AR_CONFIG.floorOffsetMeters * 0.5
         shadowPlane.receiveShadow = true
         markerRoot.add(shadowPlane)
 
-        // Gravity ring visual on the marker surface under the feet
+        // ── 7. Decorative ground ring ────────────────────────────────────
         const ringMesh = new THREE.Mesh(
           new THREE.RingGeometry(0.16, 0.22, 64),
           new THREE.MeshBasicMaterial({
             color: 0xffcc00,
             side: THREE.DoubleSide,
             transparent: true,
-            opacity: 0.6,
+            opacity: 0.55,
           })
         )
         ringMesh.rotation.x = -Math.PI / 2
-        ringMesh.position.y = 0.001
+        ringMesh.position.y = AR_CONFIG.floorOffsetMeters
         markerRoot.add(ringMesh)
 
-        // Directional sunlight shining from above the floor onto the elephant
-        const dirLight = new THREE.DirectionalLight(0xffffff, 2.2)
-        dirLight.position.set(0.8, 2.5, 1.2)
-        dirLight.castShadow            = true
-        dirLight.shadow.mapSize.width  = 2048
-        dirLight.shadow.mapSize.height = 2048
-        dirLight.shadow.camera.near    = 0.05
-        dirLight.shadow.camera.far     = 6
-        dirLight.shadow.camera.left    = -1
-        dirLight.shadow.camera.right   = 1
-        dirLight.shadow.camera.top     = 1
-        dirLight.shadow.camera.bottom  = -1
-        dirLight.target.position.set(0, 0, 0)
-        markerRoot.add(dirLight)
-        markerRoot.add(dirLight.target)
+        // ── 8. Character key light ───────────────────────────────────────
+        // Frustum covers the full marker area so shadows are correctly cast.
+        const halfFrustum = AR_CONFIG.markerWidthMeters / 2
+        const characterLight = new THREE.DirectionalLight(0xffffff, 2.2)
+        characterLight.position.set(0.8, 2.5, 1.2)
+        characterLight.castShadow             = true
+        characterLight.shadow.mapSize.width   = 2048
+        characterLight.shadow.mapSize.height  = 2048
+        characterLight.shadow.camera.near     = 0.05
+        characterLight.shadow.camera.far      = AR_CONFIG.markerWidthMeters * 4
+        characterLight.shadow.camera.left     = -halfFrustum
+        characterLight.shadow.camera.right    =  halfFrustum
+        characterLight.shadow.camera.top      =  halfFrustum
+        characterLight.shadow.camera.bottom   = -halfFrustum
+        characterLight.target.position.set(0, 0, 0)
+        markerRoot.add(characterLight)
+        markerRoot.add(characterLight.target)
 
-        // ── 4. Load Elephant GLB (fully local) ────────────────────
-        setLoadingMsg('Loading elephant model...')
+        // ── 9. Load GLB model ────────────────────────────────────────────
+        setLoadingMsg('Loading Chhota Bheem model...')
 
         const dracoLoader = new DRACOLoader()
         dracoLoader.setDecoderPath('vendor/draco/')
@@ -175,7 +225,6 @@ export default function MarkerARScene({ onExit }) {
         loader.setDRACOLoader(dracoLoader)
 
         let elephantGroup = null
-        let mixer         = null
 
         try {
           const gltf = await loader.loadAsync('assets/Elephant_Turn_Walk.glb')
@@ -184,90 +233,134 @@ export default function MarkerARScene({ onExit }) {
           const elScene = gltf.scene
           elSceneRef.current = elScene
 
-          // Find exact foot Y offset so feet are glued precisely to y=0 (marker surface)
-          const box = new THREE.Box3().setFromObject(elScene)
-          const footY = box.min.y
-          footYRef.current = footY
-
+          // Shadows & frustum culling
           elScene.traverse(child => {
             if (child.isMesh || child.isSkinnedMesh) {
               child.frustumCulled = false
               child.castShadow    = true
+              child.receiveShadow = true
             }
           })
 
-          const initScale = modelScaleRef.current
-          elScene.scale.setScalar(initScale)
-          elScene.position.y = -footY * initScale // Glue feet to marker surface y=0!
+          // ── 10. Compute exact real-world scale ───────────────────────
+          //
+          // MindAR's coordinate system: 1 unit = markerWidthMeters
+          //
+          // We want the character to be characterHeightMeters tall.
+          //
+          //   unitsPerMetre  = 1 / markerWidthMeters
+          //   targetHeightUnits = characterHeightMeters / markerWidthMeters
+          //   exactScale = targetHeightUnits / nativeModelHeight
+          //
+          const originalBox    = new THREE.Box3().setFromObject(elScene)
+          const nativeHeight   = originalBox.max.y - originalBox.min.y
 
+          if (!Number.isFinite(nativeHeight) || nativeHeight <= 0) {
+            throw new Error('Could not determine model height from bounding box.')
+          }
+
+          const exactScale =
+            (AR_CONFIG.characterHeightMeters / AR_CONFIG.markerWidthMeters) /
+            nativeHeight
+
+          console.log(
+            '[AR_CONFIG] nativeHeight:', nativeHeight.toFixed(4),
+            '| exactScale:', exactScale.toFixed(6),
+            '| characterHeight:', AR_CONFIG.characterHeightMeters + 'm'
+          )
+
+          elScene.scale.setScalar(exactScale)
+
+          // ── 11. Glue feet to floor surface ───────────────────────────
+          //
+          // After scaling, recalculate the bounding box so min.y reflects
+          // the actual scaled foot position, then shift up by that amount
+          // plus the tiny floor offset.
+          //
+          const scaledBox  = new THREE.Box3().setFromObject(elScene)
+          const scaledFoot = scaledBox.min.y
+          elScene.position.y = AR_CONFIG.floorOffsetMeters - scaledFoot
+
+          // ── 12. Base rotation from config ────────────────────────────
+          elScene.rotation.y = THREE.MathUtils.degToRad(
+            AR_CONFIG.characterRotationDegrees
+          )
+
+          // Group wraps the model so rotation from HUD buttons is applied
+          // at the group level without disturbing model.position.
           elephantGroup = new THREE.Group()
-          elephantGroup.position.set(0, 0, 0) // Centered right on the marker!
+          elephantGroup.position.set(0, 0, 0)
           elephantGroup.add(elScene)
           markerRoot.add(elephantGroup)
           elephantGroupRef.current = elephantGroup
 
-          // Strip root translation to keep animation centered on the marker
+          // ── 13. Animation ────────────────────────────────────────────
           const clips = stripRootMotion(gltf.animations)
-          mixer = new THREE.AnimationMixer(elScene)
           if (clips.length > 0) {
+            const mixer  = new THREE.AnimationMixer(elScene)
+            mixerRef.current = mixer
             const action = mixer.clipAction(clips[0])
             action.reset().fadeIn(0.3).setLoop(THREE.LoopRepeat).play()
             action.timeScale = 0.95
           }
+
         } catch (glbErr) {
           console.warn('GLB load failed, using fallback box:', glbErr)
+
+          // Fallback: a simple box at the correct real-world height.
+          const fallbackScale = AR_CONFIG.characterHeightMeters / AR_CONFIG.markerWidthMeters
           const fallback = new THREE.Mesh(
-            new THREE.BoxGeometry(0.12, 0.16, 0.12),
+            new THREE.BoxGeometry(fallbackScale * 0.4, fallbackScale, fallbackScale * 0.4),
             new THREE.MeshStandardMaterial({ color: 0xf59e0b, metalness: 0.4, roughness: 0.3 })
           )
-          fallback.position.y = 0.08
+          fallback.position.y = fallbackScale / 2 + AR_CONFIG.floorOffsetMeters
+          fallback.castShadow = true
+
           elephantGroup = new THREE.Group()
-          elephantGroup.position.set(0, 0, 0)
           elephantGroup.add(fallback)
           markerRoot.add(elephantGroup)
           elephantGroupRef.current = elephantGroup
         }
 
-        // ── 5. Tracking callbacks (debounced to prevent UI flashing) ──
+        // ── 14. Tracking callbacks (debounced) ───────────────────────────
         anchor.onTargetFound = () => {
           if (stopped) return
           if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
+          lostTimeoutRef.current = null
           setTrackingState('found')
         }
+
         anchor.onTargetLost = () => {
           if (stopped) return
-          // Hold "found" for 1.5s through momentary sensor drops / screen reflections
           if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
           lostTimeoutRef.current = setTimeout(() => {
             if (!stopped) setTrackingState('lost')
-          }, 1500)
+          }, AR_CONFIG.trackingHoldSeconds * 1000)
         }
 
-        // ── 6. Start MindAR (opens camera + begins tracking) ────────────
+        // ── 15. Start MindAR (camera + tracking) ─────────────────────────
         setLoadingMsg('Starting camera...')
         await mindarThree.start()
         if (stopped) { mindarThree.stop(); return }
 
-        // Enable continuous autofocus if supported
+        // Enable continuous autofocus if the device supports it.
         try {
           const video = mindarThree.video
           if (video?.srcObject) {
             const track = video.srcObject.getVideoTracks()[0]
-            const cap = track?.getCapabilities?.() ?? {}
+            const cap   = track?.getCapabilities?.() ?? {}
             if (cap.focusMode?.includes('continuous')) {
-              await track.applyConstraints({
-                advanced: [{ focusMode: 'continuous' }]
-              })
+              await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
             }
           }
         } catch {
-          // ignore if continuous focus is not supported
+          // Autofocus not supported on this device — ignore.
         }
 
         setIsStarting(false)
         setTrackingState('searching')
 
-        // ── 7. Render loop with anti-jitter filter & persistence latch ──
+        // ── 16. Render loop ───────────────────────────────────────────────
         const clock           = new THREE.Clock()
         const targetWorldPos  = new THREE.Vector3()
         const targetWorldQuat = new THREE.Quaternion()
@@ -277,36 +370,41 @@ export default function MarkerARScene({ onExit }) {
         let lastSeenTime      = 0
 
         renderer.setAnimationLoop(() => {
+          if (stopped) return
+
           const delta = Math.min(clock.getDelta(), 0.033)
           const now   = clock.getElapsedTime()
 
+          // ── Target visible: update smoothed pose ──────────────────────
           if (anchor.group.visible) {
             lastSeenTime = now
             anchor.group.getWorldPosition(targetWorldPos)
             anchor.group.getWorldQuaternion(targetWorldQuat)
 
             if (!hasLockedPose) {
-              // First frame detection: snap instantly
+              // First detection — snap instantly (no lerp lag on first lock).
               smoothedPos.copy(targetWorldPos)
               smoothedQuat.copy(targetWorldQuat)
               hasLockedPose = true
             } else {
-              // Dual-rate dampening:
-              // For micro-movements (< 3cm jitter), damp heavily to eliminate vibration completely
-              // For camera movements, follow smoothly
-              const dist = smoothedPos.distanceTo(targetWorldPos)
-              const factor = dist > 0.05 ? 0.22 : 0.10
+              // Dual-rate damping:
+              //   micro-movement (< 5 cm) → heavy damping (eliminate jitter)
+              //   larger movement          → standard tracking
+              const dist   = smoothedPos.distanceTo(targetWorldPos)
+              const factor = dist > 0.05
+                ? AR_CONFIG.positionSmoothing
+                : AR_CONFIG.positionSmoothing * 0.5
               smoothedPos.lerp(targetWorldPos, factor)
-              smoothedQuat.slerp(targetWorldQuat, factor)
+              smoothedQuat.slerp(targetWorldQuat, AR_CONFIG.rotationSmoothing)
             }
 
             displayRoot.position.copy(smoothedPos)
             displayRoot.quaternion.copy(smoothedQuat)
             displayRoot.visible = true
+
           } else {
-            // Persistence latch: keep elephant standing steady for 3.0 seconds
-            // through camera wobbles, screen glare, or partial occlusions
-            if (hasLockedPose && (now - lastSeenTime < 3.0)) {
+            // ── Target lost: persistence latch ───────────────────────────
+            if (hasLockedPose && (now - lastSeenTime < AR_CONFIG.trackingHoldSeconds)) {
               displayRoot.visible = true
             } else if (hasLockedPose) {
               displayRoot.visible = false
@@ -314,18 +412,17 @@ export default function MarkerARScene({ onExit }) {
             }
           }
 
-          // Keep elephant glued to (0, 0, 0) with user's desired scale and rotation
-          if (elSceneRef.current && elephantGroupRef.current) {
-            const currentScale = modelScaleRef.current
-            elSceneRef.current.scale.setScalar(currentScale)
-            elSceneRef.current.position.y = -footYRef.current * currentScale
+          // ── Apply live rotation from HUD buttons ──────────────────────
+          if (elephantGroupRef.current) {
             elephantGroupRef.current.rotation.y = modelRotationRef.current
           }
 
-          // Gentle decorative glow pulse on marker surface ring
+          // ── Decorative ring spin ───────────────────────────────────────
           ringMesh.rotation.z += delta * 0.8
 
-          if (mixer) mixer.update(delta)
+          // ── Animation update ───────────────────────────────────────────
+          if (mixerRef.current) mixerRef.current.update(delta)
+
           renderer.render(scene, camera)
         })
 
@@ -333,13 +430,13 @@ export default function MarkerARScene({ onExit }) {
         console.error('MindAR error:', err)
         if (stopped) return
 
-        const msg = err.message ?? ''
+        const msg = err?.message ?? ''
         if (msg.includes('targets.mind') || msg.includes('404') || msg.includes('fetch')) {
           setErrorMsg('TARGETS_MIND')
         } else if (err.name === 'NotAllowedError' || msg.includes('camera') || msg.includes('permission')) {
           setErrorMsg('Camera permission denied. Please allow camera access and try again.')
         } else {
-          setErrorMsg('AR Error: ' + (msg || err.name || 'Unknown error'))
+          setErrorMsg('AR Error: ' + (msg || err?.name || 'Unknown error'))
         }
         setIsStarting(false)
       }
@@ -355,8 +452,11 @@ export default function MarkerARScene({ onExit }) {
           mindARRef.current.renderer?.setAnimationLoop(null)
           mindARRef.current.stop()
         }
-      } catch (e) { /* ignore cleanup errors on unmount */ }
-      mindARRef.current = null
+      } catch { /* ignore cleanup errors */ }
+      mixerRef.current        = null
+      elSceneRef.current      = null
+      elephantGroupRef.current = null
+      mindARRef.current       = null
     }
   }, [])
 
@@ -364,10 +464,10 @@ export default function MarkerARScene({ onExit }) {
 
   return (
     <div className="fixed inset-0 z-0 bg-black">
-      {/* MindAR mounts its own canvas + video inside this div */}
+      {/* MindAR mounts its own canvas + video feed inside this div */}
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* ── Loading overlay ── */}
+      {/* ── Loading overlay ─────────────────────────────────────────── */}
       {isStarting && !errorMsg && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-xl gap-5">
           <div className="relative w-16 h-16">
@@ -388,7 +488,7 @@ export default function MarkerARScene({ onExit }) {
         </div>
       )}
 
-      {/* ── Error overlay ── */}
+      {/* ── Error overlay ────────────────────────────────────────────── */}
       {errorMsg && (
         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-xl gap-5 p-6 text-center">
           <div className="text-5xl">⚠️</div>
@@ -398,7 +498,7 @@ export default function MarkerARScene({ onExit }) {
             </p>
             <p className="text-slate-300 text-sm mt-2 max-w-sm">
               {isTargetsMindError
-                ? 'The targets.mind file is missing. Compile it once from the Bheem marker card.'
+                ? 'The targets.mind file is missing. Compile it once from your marker image.'
                 : errorMsg}
             </p>
           </div>
@@ -445,9 +545,10 @@ export default function MarkerARScene({ onExit }) {
         </div>
       )}
 
-      {/* ── Active HUD ── */}
+      {/* ── Active HUD ──────────────────────────────────────────────── */}
       {!isStarting && !errorMsg && (
         <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 py-3 bg-slate-950/75 backdrop-blur-xl border-b border-white/10">
+          {/* Quit button */}
           <button
             onClick={onExit}
             className="bg-slate-800/90 text-slate-200 border border-slate-700/80 px-3 py-1.5 text-xs font-bold tracking-wide rounded-2xl flex items-center gap-1.5"
@@ -455,6 +556,7 @@ export default function MarkerARScene({ onExit }) {
             ← Quit
           </button>
 
+          {/* Tracking status pill */}
           <div
             className={[
               'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border transition-all',
@@ -482,28 +584,8 @@ export default function MarkerARScene({ onExit }) {
               : '🔍 SCANNING...'}
           </div>
 
-          {/* Quick scale & rotation controls */}
+          {/* Rotation controls */}
           <div className="flex items-center gap-1.5 bg-slate-900/90 border border-white/10 rounded-full px-2 py-1 shadow-lg backdrop-blur-md">
-            <button
-              onClick={() => setModelScale(s => Math.max(0.15, +(s - 0.05).toFixed(2)))}
-              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
-              title="Shrink elephant"
-            >
-              <ZoomOut className="w-3 h-3" />
-            </button>
-            <span className="text-[10px] font-mono font-bold text-amber-300 w-8 text-center">
-              {(modelScale * 100).toFixed(0)}%
-            </span>
-            <button
-              onClick={() => setModelScale(s => Math.min(1.0, +(s + 0.05).toFixed(2)))}
-              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
-              title="Enlarge elephant"
-            >
-              <ZoomIn className="w-3 h-3" />
-            </button>
-
-            <div className="w-[1px] h-3.5 bg-white/20 mx-0.5" />
-
             <button
               onClick={() => setModelRotation(r => r - Math.PI / 6)}
               className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
@@ -522,25 +604,27 @@ export default function MarkerARScene({ onExit }) {
         </div>
       )}
 
-      {/* ── Scanning hint ── */}
+      {/* ── Bottom hint — searching ──────────────────────────────────── */}
       {!isStarting && !errorMsg && trackingState !== 'found' && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
           <div className="bg-slate-950/85 border border-amber-400/40 rounded-2xl px-5 py-3 text-center max-w-[290px]">
             <div className="text-2xl mb-1">📄</div>
-            <p className="text-amber-300 font-black text-sm">Point camera at Bheem Card</p>
+            <p className="text-amber-300 font-black text-sm">Point camera at floor marker</p>
             <p className="text-slate-400 text-xs mt-1">
-              Print <strong className="text-slate-300">bheem_marker.jpg</strong> and aim camera at it
+              Waiting for marker…
             </p>
           </div>
         </div>
       )}
 
-      {/* ── Marker found ── */}
+      {/* ── Bottom hint — found ──────────────────────────────────────── */}
       {!isStarting && !errorMsg && trackingState === 'found' && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
           <div className="bg-emerald-900/80 border border-emerald-400/60 rounded-2xl px-5 py-3 text-center shadow-[0_0_30px_rgba(16,185,129,0.4)]">
-            <p className="text-emerald-300 font-black text-sm">🐘 Safari Elephant is ALIVE!</p>
-            <p className="text-slate-300 text-xs mt-1">Walk around the card to see full 3D!</p>
+            <p className="text-emerald-300 font-black text-sm">🐘 Character Active</p>
+            <p className="text-slate-300 text-xs mt-1">
+              Height: {AR_CONFIG.characterHeightMeters}m · Marker: {AR_CONFIG.markerWidthMeters}m wide
+            </p>
           </div>
         </div>
       )}
