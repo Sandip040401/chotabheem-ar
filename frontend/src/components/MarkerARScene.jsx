@@ -600,120 +600,156 @@ export default function MarkerARScene({ onExit }) {
         </div>
       )}
 
-      {/* ── Top HUD Bar ─────────────────────────────────────────────── */}
-      {!isStarting && !errorMsg && (
-        <header className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3.5 py-2.5 bg-slate-950/80 backdrop-blur-xl border-b border-white/10">
-          {/* Quit Button */}
-          <button
-            onClick={onExit}
-            className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 border border-white/10 px-3 py-1.5 text-xs font-bold rounded-xl active:scale-95 transition-all"
-          >
-            ← Exit
-          </button>
+      {/* ── Top HUD Bar (Always visible at z-50) ─────────────────── */}
+      <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-3 py-2.5 bg-slate-950/90 backdrop-blur-xl border-b border-white/10 shadow-2xl">
+        {/* Quit Button */}
+        <button
+          onClick={onExit}
+          className="bg-slate-900 hover:bg-slate-800 text-slate-300 border border-white/15 px-3.5 py-1.5 text-xs font-bold rounded-xl active:scale-95 transition-all shadow-md"
+        >
+          ← Exit
+        </button>
 
-          {/* Tracking & Lock Status Pill */}
-          <div
+        {/* Tracking & Lock Status Pill */}
+        <div
+          className={[
+            'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-black border transition-all duration-300 shadow-md',
+            isPositionLocked
+              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/60 shadow-[0_0_15px_rgba(16,185,129,0.3)]'
+              : trackingState === 'detected'
+              ? 'bg-amber-500/20 text-amber-300 border-amber-400/60 animate-pulse'
+              : trackingState === 'held'
+              ? 'bg-sky-500/20 text-sky-300 border-sky-400/60'
+              : isStarting
+              ? 'bg-indigo-500/20 text-indigo-300 border-indigo-400/50'
+              : 'bg-slate-800/80 text-slate-400 border-slate-700/60',
+          ].join(' ')}
+        >
+          <span
             className={[
-              'flex items-center gap-2 px-3 py-1 rounded-full text-xs font-black border transition-all duration-300 shadow-md',
+              'w-2 h-2 rounded-full flex-shrink-0',
               isPositionLocked
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/60 shadow-[0_0_15px_rgba(16,185,129,0.25)]'
+                ? 'bg-emerald-400'
                 : trackingState === 'detected'
-                ? 'bg-amber-500/20 text-amber-300 border-amber-400/60 animate-pulse'
+                ? 'bg-amber-400 animate-ping'
                 : trackingState === 'held'
-                ? 'bg-sky-500/20 text-sky-300 border-sky-400/60'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700/60',
+                ? 'bg-sky-400'
+                : isStarting
+                ? 'bg-indigo-400 animate-pulse'
+                : 'bg-slate-500',
             ].join(' ')}
-          >
-            <span
-              className={[
-                'w-2 h-2 rounded-full flex-shrink-0',
-                isPositionLocked
-                  ? 'bg-emerald-400'
-                  : trackingState === 'detected'
-                  ? 'bg-amber-400'
-                  : trackingState === 'held'
-                  ? 'bg-sky-400'
-                  : 'bg-slate-500',
-              ].join(' ')}
-            />
-            <span>
-              {isPositionLocked
-                ? '🔒 FIXED ON FLOOR'
-                : trackingState === 'detected'
-                ? '🟢 MARKER DETECTED'
-                : trackingState === 'held'
-                ? '📍 POSITION HELD'
-                : '🔍 SCANNING...'}
-            </span>
-          </div>
+          />
+          <span>
+            {isPositionLocked
+              ? '🔒 FIXED ON FLOOR'
+              : trackingState === 'detected'
+              ? '🟢 MARKER DETECTED'
+              : trackingState === 'held'
+              ? '📍 POSITION HELD'
+              : isStarting
+              ? '⏳ STARTING AR...'
+              : '🔍 SCANNING...'}
+          </span>
+        </div>
 
-          {/* Settings / Config Button */}
+        {/* Top Quick Actions: Fix Shortcut & Config */}
+        <div className="flex items-center gap-1.5">
+          {!isPositionLocked ? (
+            <button
+              onClick={handleFixPosition}
+              disabled={!canFixPosition}
+              className={[
+                'flex items-center gap-1 px-3 py-1.5 text-xs font-black rounded-xl transition-all shadow-md',
+                canFixPosition
+                  ? 'bg-amber-400 hover:bg-amber-300 text-slate-950 animate-bounce active:scale-95 shadow-[0_0_15px_rgba(251,191,36,0.6)]'
+                  : 'bg-slate-800 text-slate-500 border border-white/5 opacity-60 cursor-not-allowed',
+              ].join(' ')}
+              title="Lock AR Position"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>Lock</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleUnlockPosition}
+              className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 px-2.5 py-1.5 text-xs font-bold rounded-xl active:scale-95 transition-all shadow-md"
+              title="Unlock AR Position"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              <span>Unlock</span>
+            </button>
+          )}
+
           <button
             onClick={() => setShowConfigModal(true)}
-            className="flex items-center gap-1.5 bg-slate-900/90 hover:bg-slate-800 text-amber-300 border border-amber-400/30 px-3 py-1.5 text-xs font-bold rounded-xl active:scale-95 transition-all shadow-md"
+            className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-400/30 px-3 py-1.5 text-xs font-bold rounded-xl active:scale-95 transition-all shadow-md"
             title="Open AR Configuration"
           >
             <Settings className="w-3.5 h-3.5" />
             <span>Config</span>
           </button>
-        </header>
-      )}
+        </div>
+      </header>
 
-      {/* ── Main Interactive Bottom Control Bar ──────────────────────── */}
-      {!isStarting && !errorMsg && (
-        <div className="absolute bottom-4 left-0 right-0 z-30 flex flex-col items-center gap-3 px-4 pointer-events-none">
+      {/* ── Main Interactive Bottom Control Bar (Always visible at z-50) ── */}
+      <div className="fixed bottom-4 sm:bottom-6 left-0 right-0 z-50 flex flex-col items-center gap-2.5 px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] pointer-events-auto">
 
-          {/* Notification Toast */}
-          {saveToast && (
-            <div className="pointer-events-auto bg-emerald-950/90 border border-emerald-400/60 text-emerald-200 px-4 py-2 rounded-2xl text-xs font-black shadow-2xl flex items-center gap-2 animate-bounce">
-              <Check className="w-4 h-4 text-emerald-400" />
-              <span>Position permanently fixed! Occlusion immune.</span>
-            </div>
-          )}
+        {/* Notification Toast */}
+        {saveToast && (
+          <div className="bg-emerald-950/95 border border-emerald-400/70 text-emerald-200 px-4 py-2 rounded-2xl text-xs font-black shadow-2xl flex items-center gap-2 animate-bounce">
+            <Check className="w-4 h-4 text-emerald-400" />
+            <span>Position permanently fixed! Immune to occlusion.</span>
+          </div>
+        )}
 
-          {/* Quick Controls Card */}
-          <div className="pointer-events-auto w-full max-w-md bg-slate-950/90 backdrop-blur-2xl border border-white/15 rounded-3xl p-3 shadow-2xl flex flex-col gap-3">
+        {/* Quick Controls Card */}
+        <div className="w-full max-w-md bg-slate-950/95 backdrop-blur-2xl border-2 border-white/20 rounded-3xl p-3.5 shadow-[0_10px_40px_rgba(0,0,0,0.8)] flex flex-col gap-3">
 
-            {/* Row 1: Primary Action Button (Fix Position / Unlock) */}
-            <div>
-              {!isPositionLocked ? (
-                <button
-                  id="btn-fix-position"
-                  onClick={handleFixPosition}
-                  disabled={!canFixPosition}
-                  className={[
-                    'w-full py-3.5 px-4 rounded-2xl font-black text-sm flex flex-col items-center justify-center gap-1 transition-all duration-300 shadow-xl',
-                    canFixPosition
-                      ? 'bg-gradient-to-r from-amber-400 via-amber-300 to-emerald-400 text-slate-950 shadow-[0_0_30px_rgba(245,158,11,0.6)] hover:scale-[1.02] active:scale-[0.98]'
-                      : 'bg-slate-800/90 text-slate-400 border border-white/10 opacity-75',
-                  ].join(' ')}
-                >
-                  <div className="flex items-center gap-2 text-sm font-black">
-                    <Lock className="w-4 h-4" />
-                    <span>{canFixPosition ? '📌 CLICK TO FIX / LOCK POSITION' : '🔒 FIX / LOCK POSITION'}</span>
-                  </div>
-                  <span className="text-[11px] font-semibold opacity-85">
-                    {canFixPosition ? 'Marker detected! Tap to freeze AR on floor' : 'Point camera at marker first to activate'}
-                  </span>
-                </button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-emerald-500/20 border border-emerald-400/50 rounded-2xl py-2.5 px-3 flex items-center justify-center gap-2 text-emerald-300 text-xs font-black shadow-lg">
-                    <Check className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                    <span>🔒 POSITION FIXED (IMMUNE TO OCCLUSION)</span>
-                  </div>
-                  <button
-                    id="btn-unlock-position"
-                    onClick={handleUnlockPosition}
-                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/15 px-4 py-2.5 rounded-2xl text-xs font-black active:scale-95 transition-all flex items-center gap-1.5 shadow-md"
-                    title="Unlock to re-track marker"
-                  >
-                    <Unlock className="w-4 h-4 text-amber-400" />
-                    <span>Unlock</span>
-                  </button>
+          {/* Row 1: Primary Action Button (Fix Position / Unlock) */}
+          <div>
+            {isStarting ? (
+              <div className="w-full py-3.5 px-4 rounded-2xl font-black text-xs flex items-center justify-center gap-2 bg-slate-900 text-amber-300 border border-amber-500/30 animate-pulse">
+                <span className="w-3 h-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+                <span>STARTING AR CAMERA & LOADING MODEL...</span>
+              </div>
+            ) : !isPositionLocked ? (
+              <button
+                id="btn-fix-position"
+                onClick={handleFixPosition}
+                disabled={!canFixPosition}
+                className={[
+                  'w-full py-3.5 px-4 rounded-2xl font-black text-sm flex flex-col items-center justify-center gap-1 transition-all duration-300 shadow-xl',
+                  canFixPosition
+                    ? 'bg-gradient-to-r from-amber-400 via-amber-300 to-emerald-400 text-slate-950 shadow-[0_0_30px_rgba(245,158,11,0.7)] hover:scale-[1.02] active:scale-[0.98]'
+                    : 'bg-slate-800/90 text-slate-400 border border-white/10 opacity-75',
+                ].join(' ')}
+              >
+                <div className="flex items-center gap-2 text-sm font-black">
+                  <Lock className="w-4 h-4" />
+                  <span>{canFixPosition ? '📌 CLICK TO FIX / LOCK POSITION' : '🔒 FIX / LOCK POSITION'}</span>
                 </div>
-              )}
-            </div>
+                <span className="text-[11px] font-semibold opacity-85">
+                  {canFixPosition ? 'Marker detected! Tap to freeze AR on floor' : 'Point camera at marker first to activate'}
+                </span>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="flex-1 bg-emerald-500/20 border border-emerald-400/50 rounded-2xl py-2.5 px-3 flex items-center justify-center gap-2 text-emerald-300 text-xs font-black shadow-lg">
+                  <Check className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <span>🔒 POSITION FIXED (IMMUNE TO OCCLUSION)</span>
+                </div>
+                <button
+                  id="btn-unlock-position"
+                  onClick={handleUnlockPosition}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/15 px-4 py-2.5 rounded-2xl text-xs font-black active:scale-95 transition-all flex items-center gap-1.5 shadow-md"
+                  title="Unlock to re-track marker"
+                >
+                  <Unlock className="w-4 h-4 text-amber-400" />
+                  <span>Unlock</span>
+                </button>
+              </div>
+            )}
+          </div>
 
             {/* Row 2: Quick Size Controls & Rotation Controls */}
             <div className="grid grid-cols-2 gap-2">
@@ -780,7 +816,6 @@ export default function MarkerARScene({ onExit }) {
           )}
 
         </div>
-      )}
 
       {/* ── Comprehensive Config Drawer / Modal ──────────────────────── */}
       {showConfigModal && (
