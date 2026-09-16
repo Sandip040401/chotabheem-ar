@@ -1,29 +1,44 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MindARThree } from 'mind-ar/dist/mindar-image-three.prod.js'
-import { RotateCcw, RotateCw } from 'lucide-react'
+import { RotateCcw, RotateCw, RefreshCw, Lock } from 'lucide-react'
 
 /**
- * MarkerARScene — Fixed Real-World Character Sizing
+ * MarkerARScene — Fixed Real-World Character Sizing + One-Shot Pose Lock
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * OCCLUSION-PROOF FIXED INSTALLATION MODE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Problem:  People standing on the floor marker block the camera's view.
+ *           MindAR loses tracking → character disappears.
+ *
+ * Solution: Since the camera NEVER MOVES in this installation, we only need
+ *           to detect the marker ONCE at startup. After poseLockFrames of
+ *           stable detection, the world pose is permanently frozen.
+ *           Occlusion after that point is completely irrelevant — the character
+ *           never disappears no matter what stands on the marker.
+ *
+ * State machine:
+ *
+ *   SEARCHING ──► CALIBRATING ──► 🔒 LOCKED (permanent)
+ *                                      │
+ *                              [Re-calibrate button]
+ *                                      │
+ *                                  SEARCHING
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CHARACTER SIZING
+ * ─────────────────────────────────────────────────────────────────────────────
  *
  * Character size is COMPLETELY INDEPENDENT of marker size.
  *
- * The only values that need calibrating are in AR_CONFIG below.
- *
  * Formula:
- *   MindAR unit scale  = characterHeightMeters / markerWidthMeters
- *   Final model scale  = (above) / nativeModelHeightUnits
+ *   exactScale = (characterHeightMeters / markerWidthMeters) / nativeModelHeight
  *
- * Example installation:
- *   Physical marker:  3.0 m wide
- *   Character:        1.5 m tall
- *   Camera:           ~8 m away
- *
- * Changing markerWidthMeters does NOT change the character height on screen.
- * If the character looks too large/small relative to a standing person,
- * adjust characterHeightMeters and re-test.
+ * Only AR_CONFIG needs changing. The GLB's internal units don't matter.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,27 +54,36 @@ const AR_CONFIG = {
   characterHeightMeters: 1.5,
 
   // Base rotation of the character around the vertical axis (Y).
-  // The HUD rotation buttons offset from this value at runtime.
+  // HUD rotation buttons offset from this value at runtime.
   characterRotationDegrees: 0,
 
   // Small Y offset above floor surface to prevent z-fighting.
   floorOffsetMeters: 0.002,
 
-  // ── Tracking smoothing ───────────────────────────────────────────────────
-  // Lerp/slerp factors per frame. Lower = smoother but more lag.
-  // Micro-movement (< 5 cm) uses half of this to eliminate jitter.
+  // ── Pose lock (occlusion-proof fixed installation) ───────────────────────
+  // Number of consecutive stable tracking frames required before the pose
+  // is permanently locked. At 30 fps, 45 frames ≈ 1.5 seconds.
+  // Once locked, marker occlusion (people standing on it) has zero effect.
+  poseLockFrames: 45,
+
+  // ── Tracking (pre-lock / fallback) ──────────────────────────────────────
+  // Lerp/slerp factor per frame during the calibration phase.
   positionSmoothing: 0.12,
   rotationSmoothing: 0.12,
 
-  // How long (seconds) to keep the character visible after marker disappears.
-  trackingHoldSeconds: 1.5,
+  // MindAR: consecutive missed frames before declaring tracking lost.
+  // 300 ≈ 10 s at 30 fps — buys time during partial occlusions before lock.
+  missTolerance: 300,
+
+  // Seconds to hold the character visible if tracking is lost before lock.
+  trackingHoldSeconds: 5,
 
   // ── Rendering ────────────────────────────────────────────────────────────
   maxPixelRatio: 2.5,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ROOT BONE NAMES — root motion stripped so character stays on marker
+// ROOT BONE NAMES — stripped so the character stays centred on the marker
 // ─────────────────────────────────────────────────────────────────────────────
 const ROOT_BONES = ['elep_4_Root_M', 'elep_4_RootPart1_M']
 
@@ -84,26 +108,43 @@ export default function MarkerARScene({ onExit }) {
   const containerRef = useRef(null)
   const mindARRef    = useRef(null)
 
+  // 'searching' | 'calibrating' | 'locked' | 'lost'
   const [trackingState, setTrackingState] = useState('searching')
   const [isStarting,   setIsStarting]     = useState(true)
   const [loadingMsg,   setLoadingMsg]     = useState('Initialising AR...')
   const [errorMsg,     setErrorMsg]       = useState(null)
+  const [lockProgress, setLockProgress]   = useState(0) // 0–100 %
 
-  // Runtime rotation offset that operators can adjust via HUD buttons.
-  // Added on top of AR_CONFIG.characterRotationDegrees every frame.
+  // Runtime rotation offset — operators adjust via HUD buttons.
   const [modelRotation, setModelRotation] = useState(0)
   const modelRotationRef = useRef(0)
 
-  const elSceneRef      = useRef(null)
+  const elSceneRef       = useRef(null)
   const elephantGroupRef = useRef(null)
-  const lostTimeoutRef  = useRef(null)
-  const mixerRef        = useRef(null)
+  const lostTimeoutRef   = useRef(null)
+  const mixerRef         = useRef(null)
 
-  // Keep rotation ref in sync with state so the render loop reads it without
-  // needing a React re-render on every button press.
+  // Shared with render loop so re-calibrate button can reset state cleanly.
+  const poseLockRef      = useRef({
+    locked:      false,
+    frameCount:  0,
+    lockedPos:   new THREE.Vector3(),
+    lockedQuat:  new THREE.Quaternion(),
+  })
+
+  // Keep rotation ref in sync without a React re-render on every frame.
   useEffect(() => {
     modelRotationRef.current = modelRotation
   }, [modelRotation])
+
+  // Re-calibrate: resets the lock so a fresh detection cycle begins.
+  const handleRecalibrate = useCallback(() => {
+    const pl = poseLockRef.current
+    pl.locked     = false
+    pl.frameCount = 0
+    setTrackingState('searching')
+    setLockProgress(0)
+  }, [])
 
   // ── Main AR lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -123,7 +164,9 @@ export default function MarkerARScene({ onExit }) {
           filterMinCF:     0.0001,
           filterBeta:      0.001,
           warmupTolerance: 2,
-          missTolerance:   45,
+          // High miss tolerance gives MindAR maximum chance to re-acquire
+          // during the calibration window before the pose lock triggers.
+          missTolerance:   AR_CONFIG.missTolerance,
           maxTrack:        1,
         })
 
@@ -149,30 +192,28 @@ export default function MarkerARScene({ onExit }) {
         fillLight.position.set(-2, 2, -1)
         scene.add(fillLight)
 
-        // ── 4. MindAR anchor (tracks marker index 0) ─────────────────────
+        // ── 4. MindAR anchor ─────────────────────────────────────────────
         const anchor = mindarThree.addAnchor(0)
 
         // ── 5. Display hierarchy ─────────────────────────────────────────
         //
-        // displayRoot  ← positioned by LERP/SLERP each frame (anti-jitter)
-        //   └─ markerRoot  ← rotated +90° around X so +Y is up from the floor
+        // displayRoot  ← repositioned by LERP/SLERP until lock, then frozen
+        //   └─ markerRoot  ← rotated +90° around X so +Y is up from floor
         //        ├─ shadowPlane
         //        ├─ ringMesh  (decorative)
         //        ├─ characterLight + target
         //        └─ elephantGroup
-        //             └─ elScene  (the GLB model)
+        //             └─ elScene  (GLB model)
         //
         const displayRoot = new THREE.Group()
         displayRoot.visible = false
         scene.add(displayRoot)
 
-        // Rotate so the marker's horizontal plane becomes the XZ floor.
         const markerRoot = new THREE.Group()
         markerRoot.rotation.x = Math.PI / 2
         displayRoot.add(markerRoot)
 
         // ── 6. Floor shadow catcher ──────────────────────────────────────
-        // Sized to the physical marker so shadows look grounded correctly.
         const halfW = AR_CONFIG.markerWidthMeters
         const shadowPlane = new THREE.Mesh(
           new THREE.PlaneGeometry(halfW, halfW),
@@ -198,7 +239,6 @@ export default function MarkerARScene({ onExit }) {
         markerRoot.add(ringMesh)
 
         // ── 8. Character key light ───────────────────────────────────────
-        // Frustum covers the full marker area so shadows are correctly cast.
         const halfFrustum = AR_CONFIG.markerWidthMeters / 2
         const characterLight = new THREE.DirectionalLight(0xffffff, 2.2)
         characterLight.position.set(0.8, 2.5, 1.2)
@@ -220,7 +260,6 @@ export default function MarkerARScene({ onExit }) {
 
         const dracoLoader = new DRACOLoader()
         dracoLoader.setDecoderPath('vendor/draco/')
-
         const loader = new GLTFLoader()
         loader.setDRACOLoader(dracoLoader)
 
@@ -233,7 +272,6 @@ export default function MarkerARScene({ onExit }) {
           const elScene = gltf.scene
           elSceneRef.current = elScene
 
-          // Shadows & frustum culling
           elScene.traverse(child => {
             if (child.isMesh || child.isSkinnedMesh) {
               child.frustumCulled = false
@@ -244,16 +282,13 @@ export default function MarkerARScene({ onExit }) {
 
           // ── 10. Compute exact real-world scale ───────────────────────
           //
-          // MindAR's coordinate system: 1 unit = markerWidthMeters
+          // MindAR: 1 unit = markerWidthMeters
+          // Desired: character = characterHeightMeters tall
           //
-          // We want the character to be characterHeightMeters tall.
+          //   exactScale = (characterHeightMeters / markerWidthMeters) / nativeHeight
           //
-          //   unitsPerMetre  = 1 / markerWidthMeters
-          //   targetHeightUnits = characterHeightMeters / markerWidthMeters
-          //   exactScale = targetHeightUnits / nativeModelHeight
-          //
-          const originalBox    = new THREE.Box3().setFromObject(elScene)
-          const nativeHeight   = originalBox.max.y - originalBox.min.y
+          const originalBox  = new THREE.Box3().setFromObject(elScene)
+          const nativeHeight = originalBox.max.y - originalBox.min.y
 
           if (!Number.isFinite(nativeHeight) || nativeHeight <= 0) {
             throw new Error('Could not determine model height from bounding box.')
@@ -272,22 +307,14 @@ export default function MarkerARScene({ onExit }) {
           elScene.scale.setScalar(exactScale)
 
           // ── 11. Glue feet to floor surface ───────────────────────────
-          //
-          // After scaling, recalculate the bounding box so min.y reflects
-          // the actual scaled foot position, then shift up by that amount
-          // plus the tiny floor offset.
-          //
           const scaledBox  = new THREE.Box3().setFromObject(elScene)
-          const scaledFoot = scaledBox.min.y
-          elScene.position.y = AR_CONFIG.floorOffsetMeters - scaledFoot
+          elScene.position.y = AR_CONFIG.floorOffsetMeters - scaledBox.min.y
 
           // ── 12. Base rotation from config ────────────────────────────
           elScene.rotation.y = THREE.MathUtils.degToRad(
             AR_CONFIG.characterRotationDegrees
           )
 
-          // Group wraps the model so rotation from HUD buttons is applied
-          // at the group level without disturbing model.position.
           elephantGroup = new THREE.Group()
           elephantGroup.position.set(0, 0, 0)
           elephantGroup.add(elScene)
@@ -307,7 +334,6 @@ export default function MarkerARScene({ onExit }) {
         } catch (glbErr) {
           console.warn('GLB load failed, using fallback box:', glbErr)
 
-          // Fallback: a simple box at the correct real-world height.
           const fallbackScale = AR_CONFIG.characterHeightMeters / AR_CONFIG.markerWidthMeters
           const fallback = new THREE.Mesh(
             new THREE.BoxGeometry(fallbackScale * 0.4, fallbackScale, fallbackScale * 0.4),
@@ -322,28 +348,32 @@ export default function MarkerARScene({ onExit }) {
           elephantGroupRef.current = elephantGroup
         }
 
-        // ── 14. Tracking callbacks (debounced) ───────────────────────────
+        // ── 14. Tracking callbacks ────────────────────────────────────────
+        // These only meaningfully affect the pre-lock (calibration) phase.
+        // Once locked, anchor visibility is ignored by the render loop.
         anchor.onTargetFound = () => {
           if (stopped) return
-          if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
-          lostTimeoutRef.current = null
-          setTrackingState('found')
+          if (lostTimeoutRef.current) { clearTimeout(lostTimeoutRef.current); lostTimeoutRef.current = null }
+          // Only update UI state if not yet permanently locked.
+          if (!poseLockRef.current.locked) setTrackingState('calibrating')
         }
 
         anchor.onTargetLost = () => {
           if (stopped) return
+          // Already locked — completely ignore; character stays visible.
+          if (poseLockRef.current.locked) return
           if (lostTimeoutRef.current) clearTimeout(lostTimeoutRef.current)
           lostTimeoutRef.current = setTimeout(() => {
-            if (!stopped) setTrackingState('lost')
+            if (!stopped && !poseLockRef.current.locked) setTrackingState('lost')
           }, AR_CONFIG.trackingHoldSeconds * 1000)
         }
 
-        // ── 15. Start MindAR (camera + tracking) ─────────────────────────
+        // ── 15. Start MindAR ─────────────────────────────────────────────
         setLoadingMsg('Starting camera...')
         await mindarThree.start()
         if (stopped) { mindarThree.stop(); return }
 
-        // Enable continuous autofocus if the device supports it.
+        // Continuous autofocus where supported.
         try {
           const video = mindarThree.video
           if (video?.srcObject) {
@@ -353,9 +383,7 @@ export default function MarkerARScene({ onExit }) {
               await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
             }
           }
-        } catch {
-          // Autofocus not supported on this device — ignore.
-        }
+        } catch { /* ignore */ }
 
         setIsStarting(false)
         setTrackingState('searching')
@@ -366,30 +394,41 @@ export default function MarkerARScene({ onExit }) {
         const targetWorldQuat = new THREE.Quaternion()
         const smoothedPos     = new THREE.Vector3()
         const smoothedQuat    = new THREE.Quaternion()
-        let hasLockedPose     = false
-        let lastSeenTime      = 0
+        let   hasFirstSnap    = false
+        let   lastSeenTime    = 0
 
         renderer.setAnimationLoop(() => {
           if (stopped) return
 
           const delta = Math.min(clock.getDelta(), 0.033)
           const now   = clock.getElapsedTime()
+          const pl    = poseLockRef.current
 
-          // ── Target visible: update smoothed pose ──────────────────────
-          if (anchor.group.visible) {
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // MODE A — POSE LOCKED (occlusion-proof)
+          // Once locked, always render at the stored pose. The marker's
+          // visibility is completely irrelevant from this point on.
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          if (pl.locked) {
+            displayRoot.position.copy(pl.lockedPos)
+            displayRoot.quaternion.copy(pl.lockedQuat)
+            displayRoot.visible = true
+
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // MODE B — CALIBRATION PHASE (pre-lock)
+          // Normal LERP/SLERP tracking. Count stable frames toward lock.
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          } else if (anchor.group.visible) {
             lastSeenTime = now
             anchor.group.getWorldPosition(targetWorldPos)
             anchor.group.getWorldQuaternion(targetWorldQuat)
 
-            if (!hasLockedPose) {
-              // First detection — snap instantly (no lerp lag on first lock).
+            if (!hasFirstSnap) {
+              // Snap instantly on first detection (zero lerp lag).
               smoothedPos.copy(targetWorldPos)
               smoothedQuat.copy(targetWorldQuat)
-              hasLockedPose = true
+              hasFirstSnap = true
             } else {
-              // Dual-rate damping:
-              //   micro-movement (< 5 cm) → heavy damping (eliminate jitter)
-              //   larger movement          → standard tracking
               const dist   = smoothedPos.distanceTo(targetWorldPos)
               const factor = dist > 0.05
                 ? AR_CONFIG.positionSmoothing
@@ -402,25 +441,44 @@ export default function MarkerARScene({ onExit }) {
             displayRoot.quaternion.copy(smoothedQuat)
             displayRoot.visible = true
 
-          } else {
-            // ── Target lost: persistence latch ───────────────────────────
-            if (hasLockedPose && (now - lastSeenTime < AR_CONFIG.trackingHoldSeconds)) {
-              displayRoot.visible = true
-            } else if (hasLockedPose) {
-              displayRoot.visible = false
-              hasLockedPose = false
+            // ── Count stable frames toward pose lock ──────────────────
+            pl.frameCount++
+            const progress = Math.min(
+              Math.round((pl.frameCount / AR_CONFIG.poseLockFrames) * 100),
+              100
+            )
+            // Throttle React state updates to every 5 % to avoid perf hit.
+            if (progress % 5 === 0) setLockProgress(progress)
+
+            if (pl.frameCount >= AR_CONFIG.poseLockFrames) {
+              // ✅ LOCK — freeze pose permanently
+              pl.lockedPos.copy(smoothedPos)
+              pl.lockedQuat.copy(smoothedQuat)
+              pl.locked = true
+              setTrackingState('locked')
+              setLockProgress(100)
+              console.log('[AR] Pose locked — marker occlusion no longer matters.')
             }
+
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // MODE C — HOLD (marker temporarily lost before lock)
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          } else if (hasFirstSnap && (now - lastSeenTime < AR_CONFIG.trackingHoldSeconds)) {
+            displayRoot.visible = true
+          } else {
+            displayRoot.visible = false
+            hasFirstSnap = false
           }
 
-          // ── Apply live rotation from HUD buttons ──────────────────────
+          // ── Live rotation from HUD ───────────────────────────────────
           if (elephantGroupRef.current) {
             elephantGroupRef.current.rotation.y = modelRotationRef.current
           }
 
-          // ── Decorative ring spin ───────────────────────────────────────
+          // ── Decorative ring spin ─────────────────────────────────────
           ringMesh.rotation.z += delta * 0.8
 
-          // ── Animation update ───────────────────────────────────────────
+          // ── Animation update ─────────────────────────────────────────
           if (mixerRef.current) mixerRef.current.update(delta)
 
           renderer.render(scene, camera)
@@ -453,14 +511,15 @@ export default function MarkerARScene({ onExit }) {
           mindARRef.current.stop()
         }
       } catch { /* ignore cleanup errors */ }
-      mixerRef.current        = null
-      elSceneRef.current      = null
+      mixerRef.current         = null
+      elSceneRef.current       = null
       elephantGroupRef.current = null
-      mindARRef.current       = null
+      mindARRef.current        = null
     }
   }, [])
 
   const isTargetsMindError = errorMsg === 'TARGETS_MIND'
+  const isLocked           = trackingState === 'locked'
 
   return (
     <div className="fixed inset-0 z-0 bg-black">
@@ -548,6 +607,7 @@ export default function MarkerARScene({ onExit }) {
       {/* ── Active HUD ──────────────────────────────────────────────── */}
       {!isStarting && !errorMsg && (
         <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-4 py-3 bg-slate-950/75 backdrop-blur-xl border-b border-white/10">
+
           {/* Quit button */}
           <button
             onClick={onExit}
@@ -559,71 +619,119 @@ export default function MarkerARScene({ onExit }) {
           {/* Tracking status pill */}
           <div
             className={[
-              'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border transition-all',
-              trackingState === 'found'
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/50 animate-pulse'
-                : trackingState === 'lost'
+              'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border transition-all duration-500',
+              isLocked
+                ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60'
+                : trackingState === 'calibrating'
                 ? 'bg-amber-500/20 text-amber-300 border-amber-400/50'
+                : trackingState === 'lost'
+                ? 'bg-red-500/20 text-red-300 border-red-400/50'
                 : 'bg-slate-800/80 text-slate-400 border-slate-600/50',
             ].join(' ')}
           >
-            <span
-              className={[
-                'w-2 h-2 rounded-full flex-shrink-0',
-                trackingState === 'found'
-                  ? 'bg-emerald-400'
-                  : trackingState === 'lost'
-                  ? 'bg-amber-400'
-                  : 'bg-slate-500',
-              ].join(' ')}
-            />
-            {trackingState === 'found'
-              ? '🐘 MARKER FOUND'
+            {isLocked
+              ? <Lock className="w-3 h-3 flex-shrink-0" />
+              : (
+                <span
+                  className={[
+                    'w-2 h-2 rounded-full flex-shrink-0',
+                    trackingState === 'calibrating' ? 'bg-amber-400 animate-pulse'
+                    : trackingState === 'lost'       ? 'bg-red-400'
+                    : 'bg-slate-500',
+                  ].join(' ')}
+                />
+              )
+            }
+            {isLocked
+              ? '🔒 POSE LOCKED'
+              : trackingState === 'calibrating'
+              ? `📡 CALIBRATING ${lockProgress}%`
               : trackingState === 'lost'
-              ? '📡 MARKER LOST'
+              ? '⚠️ MARKER LOST'
               : '🔍 SCANNING...'}
           </div>
 
-          {/* Rotation controls */}
-          <div className="flex items-center gap-1.5 bg-slate-900/90 border border-white/10 rounded-full px-2 py-1 shadow-lg backdrop-blur-md">
-            <button
-              onClick={() => setModelRotation(r => r - Math.PI / 6)}
-              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
-              title="Turn left 30°"
-            >
-              <RotateCcw className="w-3 h-3" />
-            </button>
-            <button
-              onClick={() => setModelRotation(r => r + Math.PI / 6)}
-              className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
-              title="Turn right 30°"
-            >
-              <RotateCw className="w-3 h-3" />
-            </button>
+          {/* Right-side controls */}
+          <div className="flex items-center gap-2">
+            {/* Re-calibrate button — only shown when locked */}
+            {isLocked && (
+              <button
+                onClick={handleRecalibrate}
+                className="flex items-center gap-1 bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-600/80 px-2.5 py-1.5 text-xs font-bold rounded-2xl active:scale-90 transition-all"
+                title="Reset pose lock and re-calibrate"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Reset
+              </button>
+            )}
+
+            {/* Rotation controls */}
+            <div className="flex items-center gap-1.5 bg-slate-900/90 border border-white/10 rounded-full px-2 py-1 shadow-lg backdrop-blur-md">
+              <button
+                onClick={() => setModelRotation(r => r - Math.PI / 6)}
+                className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+                title="Turn left 30°"
+              >
+                <RotateCcw className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => setModelRotation(r => r + Math.PI / 6)}
+                className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold active:scale-90 transition-transform"
+                title="Turn right 30°"
+              >
+                <RotateCw className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Calibration progress bar ─────────────────────────────────── */}
+      {!isStarting && !errorMsg && trackingState === 'calibrating' && (
+        <div className="absolute top-[60px] left-0 right-0 z-30 px-4">
+          <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-amber-400 to-emerald-400 rounded-full transition-all duration-200"
+              style={{ width: `${lockProgress}%` }}
+            />
           </div>
         </div>
       )}
 
       {/* ── Bottom hint — searching ──────────────────────────────────── */}
-      {!isStarting && !errorMsg && trackingState !== 'found' && (
+      {!isStarting && !errorMsg && (trackingState === 'searching' || trackingState === 'lost') && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-          <div className="bg-slate-950/85 border border-amber-400/40 rounded-2xl px-5 py-3 text-center max-w-[290px]">
+          <div className="bg-slate-950/85 border border-amber-400/40 rounded-2xl px-5 py-3 text-center max-w-[300px]">
             <div className="text-2xl mb-1">📄</div>
             <p className="text-amber-300 font-black text-sm">Point camera at floor marker</p>
             <p className="text-slate-400 text-xs mt-1">
-              Waiting for marker…
+              {trackingState === 'lost'
+                ? 'Marker lost — waiting to re-acquire…'
+                : 'Keep marker in view for ~2 seconds to lock'}
             </p>
           </div>
         </div>
       )}
 
-      {/* ── Bottom hint — found ──────────────────────────────────────── */}
-      {!isStarting && !errorMsg && trackingState === 'found' && (
+      {/* ── Bottom hint — calibrating ────────────────────────────────── */}
+      {!isStarting && !errorMsg && trackingState === 'calibrating' && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-          <div className="bg-emerald-900/80 border border-emerald-400/60 rounded-2xl px-5 py-3 text-center shadow-[0_0_30px_rgba(16,185,129,0.4)]">
-            <p className="text-emerald-300 font-black text-sm">🐘 Character Active</p>
+          <div className="bg-amber-950/80 border border-amber-400/50 rounded-2xl px-5 py-3 text-center max-w-[300px]">
+            <p className="text-amber-300 font-black text-sm">📡 Calibrating pose…</p>
             <p className="text-slate-300 text-xs mt-1">
-              Height: {AR_CONFIG.characterHeightMeters}m · Marker: {AR_CONFIG.markerWidthMeters}m wide
+              Keep marker clear — locking in {lockProgress}%
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bottom hint — locked ─────────────────────────────────────── */}
+      {!isStarting && !errorMsg && isLocked && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+          <div className="bg-emerald-950/85 border border-emerald-400/60 rounded-2xl px-5 py-3 text-center shadow-[0_0_30px_rgba(16,185,129,0.35)] max-w-[300px]">
+            <p className="text-emerald-300 font-black text-sm">🔒 Pose Locked — Occlusion-Proof</p>
+            <p className="text-slate-300 text-xs mt-1">
+              Character stays visible even if people stand on the marker
             </p>
           </div>
         </div>
