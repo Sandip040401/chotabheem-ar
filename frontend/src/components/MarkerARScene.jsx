@@ -21,6 +21,7 @@ import {
   ArrowRight,
   Maximize2,
   Sparkles,
+  Camera,
 } from 'lucide-react'
 
 /**
@@ -53,18 +54,18 @@ import {
 const STORAGE_KEY = 'chotabheem_ar_config_v1'
 
 const DEFAULT_CONFIG = {
-  markerWidthMeters: 3.0,
+  markerWidthMeters: 1.0,
   characterHeightMeters: 1.5,
-  minHeightMeters: 0.5,
-  maxHeightMeters: 4.0,
+  minHeightMeters: 0.2,
+  maxHeightMeters: 6.0,
   heightStepMeters: 0.1,
   characterRotationDegrees: 0,
   floorOffsetMeters: 0.002,
   nudgeStepMeters: 0.05,
   positionSmoothing: 0.15,
   rotationSmoothing: 0.15,
-  missTolerance: 300,
-  maxPixelRatio: 2.5,
+  missTolerance: 200,
+  maxPixelRatio: 2.0,
 }
 
 function loadSavedConfig() {
@@ -73,6 +74,7 @@ function loadSavedConfig() {
     if (raw) {
       const parsed = JSON.parse(raw)
       return {
+        markerWidth: typeof parsed.markerWidth === 'number' ? parsed.markerWidth : DEFAULT_CONFIG.markerWidthMeters,
         height: typeof parsed.height === 'number' ? parsed.height : DEFAULT_CONFIG.characterHeightMeters,
         rotation: typeof parsed.rotation === 'number' ? parsed.rotation : DEFAULT_CONFIG.characterRotationDegrees,
         floorOffset: typeof parsed.floorOffset === 'number' ? parsed.floorOffset : DEFAULT_CONFIG.floorOffsetMeters,
@@ -84,6 +86,7 @@ function loadSavedConfig() {
     console.warn('Failed to load saved AR config:', e)
   }
   return {
+    markerWidth: DEFAULT_CONFIG.markerWidthMeters,
     height: DEFAULT_CONFIG.characterHeightMeters,
     rotation: DEFAULT_CONFIG.characterRotationDegrees,
     floorOffset: DEFAULT_CONFIG.floorOffsetMeters,
@@ -120,17 +123,24 @@ function stripRootMotion(animations) {
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
-export default function MarkerARScene({ onExit }) {
+export default function MarkerARScene({ onExit, selectedCamera, cameraResolution }) {
   const containerRef = useRef(null)
   const mindARRef    = useRef(null)
 
   // Loaded user settings
   const initialCfg = loadSavedConfig()
+  const [markerWidth, setMarkerWidth]         = useState(initialCfg.markerWidth || DEFAULT_CONFIG.markerWidthMeters)
   const [characterHeight, setCharacterHeight] = useState(initialCfg.height)
   const [rotationDegrees, setRotationDegrees] = useState(initialCfg.rotation)
   const [floorOffset, setFloorOffset]         = useState(initialCfg.floorOffset)
   const [nudgeX, setNudgeX]                   = useState(initialCfg.nudgeX)
   const [nudgeZ, setNudgeZ]                   = useState(initialCfg.nudgeZ)
+
+  // Camera Quality & Device states (720p HD by default for fast 30fps tracking)
+  const [activeCamId, setActiveCamId]         = useState(() => selectedCamera || localStorage.getItem('cb_ar_camera') || '')
+  const [activeRes, setActiveRes]             = useState(() => cameraResolution || localStorage.getItem('cb_ar_resolution') || '720p')
+  const [cameraInfo, setCameraInfo]           = useState({ width: 0, height: 0, fps: 0, label: '' })
+  const [availableCameras, setAvailableCameras] = useState([])
 
   // Tracking & Pose Lock states
   // 'searching' | 'detected' | 'held' | 'locked'
@@ -138,10 +148,20 @@ export default function MarkerARScene({ onExit }) {
   const [isPositionLocked, setIsPositionLocked] = useState(false)
   const [hasEverDetected, setHasEverDetected]   = useState(false)
   const [isStarting, setIsStarting]         = useState(true)
-  const [loadingMsg, setLoadingMsg]         = useState('Initialising AR...')
+  const [loadingMsg, setLoadingMsg]         = useState('Initialising High-Definition AR...')
   const [errorMsg, setErrorMsg]             = useState(null)
   const [showConfigModal, setShowConfigModal] = useState(false)
   const [saveToast, setSaveToast]           = useState(false)
+
+  // Enumerate cameras so user can switch between webcams if multiple are connected
+  useEffect(() => {
+    if (navigator.mediaDevices?.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then(devices => {
+        const videoDevs = devices.filter(d => d.kind === 'videoinput')
+        setAvailableCameras(videoDevs)
+      }).catch(() => {})
+    }
+  }, [])
 
   // Refs for 3D objects and render loop
   const elSceneRef            = useRef(null)
@@ -150,15 +170,15 @@ export default function MarkerARScene({ onExit }) {
   const characterLightRef     = useRef(null)
   const mixerRef              = useRef(null)
   const nativeDimsRef         = useRef({ nativeHeight: 1.0, nativeMinY: 0.0 })
+  const markerRootRef         = useRef(null)
+  const anchorRef             = useRef(null)
+  const fixedGroupRef         = useRef(null)
 
   // Pose Lock data
   const lockRef = useRef({
     isLocked: false,
     hasPose: false,
-    lockedPos: new THREE.Vector3(),
-    lockedQuat: new THREE.Quaternion(),
-    lastDetectedPos: new THREE.Vector3(),
-    lastDetectedQuat: new THREE.Quaternion(),
+    lastDetectedMatrix: new THREE.Matrix4(),
   })
 
   // Live transform parameters ref so render loop doesn't lag behind state
@@ -168,44 +188,50 @@ export default function MarkerARScene({ onExit }) {
     floorOffset: initialCfg.floorOffset,
     nudgeX: initialCfg.nudgeX,
     nudgeZ: initialCfg.nudgeZ,
+    markerWidth: initialCfg.markerWidth || DEFAULT_CONFIG.markerWidthMeters,
   })
 
   // ── Sync 3D transforms on config changes ──────────────────────────────────
-  const apply3DTransforms = useCallback((h, rotDeg, fOffset, nx, nz) => {
-    liveParamsRef.current = { height: h, rotation: rotDeg, floorOffset: fOffset, nudgeX: nx, nudgeZ: nz }
+  const apply3DTransforms = useCallback((h, rotDeg, fOffset, nx, nz, mW = markerWidth) => {
+    liveParamsRef.current = { height: h, rotation: rotDeg, floorOffset: fOffset, nudgeX: nx, nudgeZ: nz, markerWidth: mW }
 
     const elScene = elSceneRef.current
     const dims = nativeDimsRef.current
     if (!elScene || !dims || dims.nativeHeight <= 0) return
 
-    // Exact real-world scale
-    const currentScale = (h / DEFAULT_CONFIG.markerWidthMeters) / dims.nativeHeight
+    const effMarkerW = Math.max(0.05, mW || DEFAULT_CONFIG.markerWidthMeters)
+
+    // Exact real-world scale:
+    // In MindAR anchor units, 1.0 unit = 1 full marker width.
+    // So character height in anchor units = h / effMarkerW.
+    const currentScale = (h / effMarkerW) / dims.nativeHeight
     elScene.scale.setScalar(currentScale)
 
     // Floor contact: feet stay at exact floor offset regardless of scale
     elScene.position.y = fOffset - (dims.nativeMinY * currentScale)
-    elScene.position.x = nx / DEFAULT_CONFIG.markerWidthMeters
-    elScene.position.z = nz / DEFAULT_CONFIG.markerWidthMeters
+    elScene.position.x = nx / effMarkerW
+    elScene.position.z = nz / effMarkerW
     elScene.rotation.y = THREE.MathUtils.degToRad(rotDeg)
 
     // Dynamic shadow plane scale
     if (shadowPlaneRef.current) {
-      const shadowSize = Math.max(DEFAULT_CONFIG.markerWidthMeters * 0.7, h * 1.5)
-      shadowPlaneRef.current.scale.set(shadowSize / DEFAULT_CONFIG.markerWidthMeters, shadowSize / DEFAULT_CONFIG.markerWidthMeters, 1)
+      const shadowSize = Math.max(effMarkerW * 0.7, h * 1.5)
+      shadowPlaneRef.current.scale.set(shadowSize / effMarkerW, shadowSize / effMarkerW, 1)
     }
-  }, [])
+  }, [markerWidth])
 
   // Update whenever state changes & auto-save to localStorage
   useEffect(() => {
-    apply3DTransforms(characterHeight, rotationDegrees, floorOffset, nudgeX, nudgeZ)
+    apply3DTransforms(characterHeight, rotationDegrees, floorOffset, nudgeX, nudgeZ, markerWidth)
     saveConfig({
+      markerWidth,
       height: characterHeight,
       rotation: rotationDegrees,
       floorOffset,
       nudgeX,
       nudgeZ,
     })
-  }, [characterHeight, rotationDegrees, floorOffset, nudgeX, nudgeZ, apply3DTransforms])
+  }, [characterHeight, rotationDegrees, floorOffset, nudgeX, nudgeZ, markerWidth, apply3DTransforms])
 
   // ── Quick controls ────────────────────────────────────────────────────────
   const handleScaleDelta = (delta) => {
@@ -229,11 +255,18 @@ export default function MarkerARScene({ onExit }) {
     const lk = lockRef.current
     if (!lk.hasPose) return
 
-    lk.lockedPos.copy(lk.lastDetectedPos)
-    lk.lockedQuat.copy(lk.lastDetectedQuat)
     lk.isLocked = true
     setIsPositionLocked(true)
     setTrackingState('locked')
+
+    if (fixedGroupRef.current && markerRootRef.current) {
+      fixedGroupRef.current.matrix.copy(lk.lastDetectedMatrix)
+      fixedGroupRef.current.matrixWorld.copy(lk.lastDetectedMatrix)
+      if (markerRootRef.current.parent !== fixedGroupRef.current) {
+        fixedGroupRef.current.add(markerRootRef.current)
+      }
+      fixedGroupRef.current.visible = true
+    }
 
     // Visual confirmation toast
     setSaveToast(true)
@@ -245,11 +278,50 @@ export default function MarkerARScene({ onExit }) {
     const lk = lockRef.current
     lk.isLocked = false
     setIsPositionLocked(false)
+
+    if (anchorRef.current?.group && markerRootRef.current) {
+      if (markerRootRef.current.parent !== anchorRef.current.group) {
+        anchorRef.current.group.add(markerRootRef.current)
+      }
+    }
+    if (fixedGroupRef.current) {
+      fixedGroupRef.current.visible = false
+    }
+
     setTrackingState('searching')
   }, [])
 
+  // ── Camera Quality & Device Switching ────────────────────────────────────
+  const handleSwitchResolution = async (newRes) => {
+    setActiveRes(newRes)
+    localStorage.setItem('cb_ar_resolution', newRes)
+    const video = mindARRef.current?.video
+    if (video?.srcObject) {
+      const track = video.srcObject.getVideoTracks()[0]
+      if (track) {
+        const [w, h] = newRes === '4k' ? [3840, 2160] : newRes === '1080p' ? [1920, 1080] : [1280, 720]
+        await track.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {})
+        const s = track.getSettings?.() || {}
+        setCameraInfo(prev => ({
+          ...prev,
+          width: s.width || w,
+          height: s.height || h,
+          fps: Math.round(s.frameRate || 30),
+        }))
+        mindARRef.current?.resize?.()
+      }
+    }
+  }
+
+  const handleSwitchCamera = (newCamId) => {
+    setActiveCamId(newCamId)
+    localStorage.setItem('cb_ar_camera', newCamId)
+    window.location.reload()
+  }
+
   // ── Reset to defaults ────────────────────────────────────────────────────
   const handleResetDefaults = () => {
+    setMarkerWidth(DEFAULT_CONFIG.markerWidthMeters)
     setCharacterHeight(DEFAULT_CONFIG.characterHeightMeters)
     setRotationDegrees(DEFAULT_CONFIG.characterRotationDegrees)
     setFloorOffset(DEFAULT_CONFIG.floorOffsetMeters)
@@ -264,7 +336,7 @@ export default function MarkerARScene({ onExit }) {
 
     async function startAR() {
       try {
-        setLoadingMsg('Preparing marker tracking...')
+        setLoadingMsg('Preparing High-Definition AR tracking...')
 
         const mindarThree = new MindARThree({
           container: containerRef.current,
@@ -276,6 +348,7 @@ export default function MarkerARScene({ onExit }) {
           warmupTolerance: 2,
           missTolerance: DEFAULT_CONFIG.missTolerance,
           maxTrack: 1,
+          environmentDeviceId: activeCamId || undefined,
         })
 
         mindARRef.current = mindarThree
@@ -299,21 +372,22 @@ export default function MarkerARScene({ onExit }) {
 
         // MindAR Anchor
         const anchor = mindarThree.addAnchor(0)
+        anchorRef.current = anchor
 
-        // Display hierarchy:
-        // displayRoot (moves until fixed, then stays frozen)
-        //   └─ markerRoot (rotated +90° around X so +Z becomes floor UP)
-        //        ├─ shadowPlane
-        //        ├─ characterLight
-        //        └─ elephantGroup
-        //             └─ elScene
-        const displayRoot = new THREE.Group()
-        displayRoot.visible = false
-        scene.add(displayRoot)
+        // Fixed Anchor for holding/locking pose in scene space (occlusion-proof)
+        const fixedGroup = new THREE.Group()
+        fixedGroup.matrixAutoUpdate = false
+        fixedGroup.visible = false
+        scene.add(fixedGroup)
+        fixedGroupRef.current = fixedGroup
 
+        // markerRoot is the 3D container for Chhota Bheem & floor shadow
         const markerRoot = new THREE.Group()
         markerRoot.rotation.x = Math.PI / 2
-        displayRoot.add(markerRoot)
+        markerRootRef.current = markerRoot
+
+        // Attach markerRoot directly to anchor.group for native MindAR tracking
+        anchor.group.add(markerRoot)
 
         // Floor shadow
         const shadowPlane = new THREE.Mesh(
@@ -429,19 +503,64 @@ export default function MarkerARScene({ onExit }) {
           }
         }
 
-        // Start MindAR
-        setLoadingMsg('Starting camera feed...')
+        // ── Start MindAR with High-Definition stream interceptor ────────────
+        setLoadingMsg('Starting HD Camera feed...')
+
+        const origGetUserMedia = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices)
+        if (navigator.mediaDevices && origGetUserMedia) {
+          const [idealW, idealH] = activeRes === '4k' ? [3840, 2160] : activeRes === '1080p' ? [1920, 1080] : [1280, 720]
+
+          navigator.mediaDevices.getUserMedia = async (constraints) => {
+            const enhanced = { ...constraints }
+            if (enhanced.video && typeof enhanced.video === 'object') {
+              enhanced.video.width = { ideal: idealW }
+              enhanced.video.height = { ideal: idealH }
+              enhanced.video.frameRate = { ideal: 30 }
+              if (activeCamId) {
+                enhanced.video.deviceId = { ideal: activeCamId }
+              }
+            }
+            try {
+              return await origGetUserMedia(enhanced)
+            } catch (hdErr) {
+              console.warn('[Camera] Stream fallback to default constraints:', hdErr)
+              return await origGetUserMedia(constraints)
+            }
+          }
+        }
+
         await mindarThree.start()
+
+        // Restore original getUserMedia
+        if (origGetUserMedia && navigator.mediaDevices) {
+          navigator.mediaDevices.getUserMedia = origGetUserMedia
+        }
+
         if (stopped) { mindarThree.stop(); return }
 
-        // Continuous autofocus
+        // Continuous sharp autofocus, auto-exposure, and white balance
         try {
           const video = mindarThree.video
           if (video?.srcObject) {
             const track = video.srcObject.getVideoTracks()[0]
-            const cap = track?.getCapabilities?.() ?? {}
-            if (cap.focusMode?.includes('continuous')) {
-              await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] })
+            if (track) {
+              const settings = track.getSettings?.() || {}
+              const cap = track.getCapabilities?.() || {}
+
+              setCameraInfo({
+                width: settings.width || 1280,
+                height: settings.height || 720,
+                fps: Math.round(settings.frameRate || 30),
+                label: track.label || 'High Definition Camera',
+              })
+
+              const advanced = []
+              if (cap.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' })
+              if (cap.exposureMode?.includes('continuous')) advanced.push({ exposureMode: 'continuous' })
+              if (cap.whiteBalanceMode?.includes('continuous')) advanced.push({ whiteBalanceMode: 'continuous' })
+              if (advanced.length > 0) {
+                await track.applyConstraints({ advanced }).catch(() => {})
+              }
             }
           }
         } catch { /* ignore autofocus error */ }
@@ -451,11 +570,7 @@ export default function MarkerARScene({ onExit }) {
 
         // ── Render loop ─────────────────────────────────────────────────────
         const clock = new THREE.Clock()
-        const targetWorldPos = new THREE.Vector3()
-        const targetWorldQuat = new THREE.Quaternion()
-        const smoothedPos = new THREE.Vector3()
-        const smoothedQuat = new THREE.Quaternion()
-        let hasFirstSnap = false
+        let hasDetectedOnce = false
 
         renderer.setAnimationLoop(() => {
           if (stopped) return
@@ -466,46 +581,41 @@ export default function MarkerARScene({ onExit }) {
           // MODE 1: POSITION LOCKED (100% Occlusion-proof)
           // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
           if (lk.isLocked) {
-            displayRoot.position.copy(lk.lockedPos)
-            displayRoot.quaternion.copy(lk.lockedQuat)
-            displayRoot.visible = true
+            if (markerRoot.parent !== fixedGroup) {
+              fixedGroup.add(markerRoot)
+            }
+            fixedGroup.matrix.copy(lk.lastDetectedMatrix)
+            fixedGroup.matrixWorld.copy(lk.lastDetectedMatrix)
+            fixedGroup.visible = true
 
           // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
           // MODE 2: ACTIVE MARKER TRACKING (Marker in view)
           // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
           } else if (anchor.group.visible) {
-            anchor.group.getWorldPosition(targetWorldPos)
-            anchor.group.getWorldQuaternion(targetWorldQuat)
-
-            if (!hasFirstSnap) {
-              smoothedPos.copy(targetWorldPos)
-              smoothedQuat.copy(targetWorldQuat)
-              hasFirstSnap = true
-            } else {
-              smoothedPos.lerp(targetWorldPos, DEFAULT_CONFIG.positionSmoothing)
-              smoothedQuat.slerp(targetWorldQuat, DEFAULT_CONFIG.rotationSmoothing)
+            if (markerRoot.parent !== anchor.group) {
+              anchor.group.add(markerRoot)
             }
+            fixedGroup.visible = false
 
-            displayRoot.position.copy(smoothedPos)
-            displayRoot.quaternion.copy(smoothedQuat)
-            displayRoot.visible = true
-
-            // Store latest valid detection
-            lk.lastDetectedPos.copy(smoothedPos)
-            lk.lastDetectedQuat.copy(smoothedQuat)
+            // MindAR updates anchor.group.matrix; compute world matrix & save it
+            anchor.group.updateMatrixWorld(true)
+            lk.lastDetectedMatrix.copy(anchor.group.matrixWorld)
             lk.hasPose = true
+            hasDetectedOnce = true
 
           // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          // MODE 3: MARKER FLICKER / OBSTRUCTED BEFORE LOCK
+          // MODE 3: MARKER TEMPORARILY OBSCURED BEFORE LOCK
           // Hold the character at last known position so user can still click "Fix Position"!
           // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          } else if (lk.hasPose) {
-            displayRoot.position.copy(lk.lastDetectedPos)
-            displayRoot.quaternion.copy(lk.lastDetectedQuat)
-            displayRoot.visible = true
+          } else if (hasDetectedOnce) {
+            fixedGroup.matrix.copy(lk.lastDetectedMatrix)
+            fixedGroup.matrixWorld.copy(lk.lastDetectedMatrix)
+            if (markerRoot.parent !== fixedGroup) {
+              fixedGroup.add(markerRoot)
+            }
+            fixedGroup.visible = true
           } else {
-            displayRoot.visible = false
-            hasFirstSnap = false
+            fixedGroup.visible = false
           }
 
           // Update animation mixer
@@ -544,6 +654,9 @@ export default function MarkerARScene({ onExit }) {
       mixerRef.current = null
       elSceneRef.current = null
       elephantGroupRef.current = null
+      markerRootRef.current = null
+      anchorRef.current = null
+      fixedGroupRef.current = null
       mindARRef.current = null
     }
   }, [apply3DTransforms])
@@ -849,8 +962,8 @@ export default function MarkerARScene({ onExit }) {
               {/* Slider */}
               <input
                 type="range"
-                min="0.5"
-                max="4.0"
+                min="0.3"
+                max="5.0"
                 step="0.05"
                 value={characterHeight}
                 onChange={e => setCharacterHeight(parseFloat(e.target.value))}
@@ -862,8 +975,8 @@ export default function MarkerARScene({ onExit }) {
                 {[
                   { label: 'Small', val: 1.0 },
                   { label: 'Normal', val: 1.5 },
-                  { label: 'Large', val: 2.0 },
-                  { label: 'Giant', val: 2.8 },
+                  { label: 'Large', val: 2.2 },
+                  { label: 'Giant', val: 3.5 },
                 ].map(p => (
                   <button
                     key={p.label}
@@ -872,6 +985,49 @@ export default function MarkerARScene({ onExit }) {
                       'py-1.5 text-[11px] font-bold rounded-xl border transition-all',
                       Math.abs(characterHeight - p.val) < 0.05
                         ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-sm'
+                        : 'bg-slate-800/80 text-slate-400 border-white/5 hover:bg-slate-700',
+                    ].join(' ')}
+                  >
+                    {p.label} ({p.val}m)
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 2. Physical Marker Width (Meters) */}
+            <div className="flex flex-col gap-2 pt-2 border-t border-white/10">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Physical Marker Width</span>
+                </label>
+                <span className="text-emerald-300 font-mono font-black text-sm">{markerWidth.toFixed(2)} m</span>
+              </div>
+
+              <input
+                type="range"
+                min="0.2"
+                max="5.0"
+                step="0.05"
+                value={markerWidth}
+                onChange={e => setMarkerWidth(parseFloat(e.target.value))}
+                className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-400"
+              />
+
+              <div className="grid grid-cols-4 gap-1.5 mt-1">
+                {[
+                  { label: 'A4 Paper', val: 0.21 },
+                  { label: 'Desk', val: 0.5 },
+                  { label: 'Standard', val: 1.0 },
+                  { label: 'Floor 3m', val: 3.0 },
+                ].map(p => (
+                  <button
+                    key={p.label}
+                    onClick={() => setMarkerWidth(p.val)}
+                    className={[
+                      'py-1.5 text-[11px] font-bold rounded-xl border transition-all',
+                      Math.abs(markerWidth - p.val) < 0.05
+                        ? 'bg-emerald-400 text-slate-950 border-emerald-300 shadow-sm font-black'
                         : 'bg-slate-800/80 text-slate-400 border-white/5 hover:bg-slate-700',
                     ].join(' ')}
                   >
@@ -985,6 +1141,64 @@ export default function MarkerARScene({ onExit }) {
                   <ArrowDown className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+
+            {/* 5. Camera Quality & Hardware Source */}
+            <div className="flex flex-col gap-2 pt-2 border-t border-white/10">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Camera className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Camera Quality</span>
+                </label>
+                <span className="text-emerald-400 font-mono font-black text-xs">
+                  {cameraInfo.width > 0 ? `${cameraInfo.width}×${cameraInfo.height} (${cameraInfo.fps}fps)` : activeRes.toUpperCase()}
+                </span>
+              </div>
+
+              {/* Resolution Toggle */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { id: '720p', label: '720p HD' },
+                  { id: '1080p', label: '1080p Full HD' },
+                  { id: '4k', label: '4K UHD' },
+                ].map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => handleSwitchResolution(r.id)}
+                    className={[
+                      'py-1.5 text-[11px] font-bold rounded-xl border transition-all',
+                      activeRes === r.id
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 font-black shadow-sm'
+                        : 'bg-slate-800/80 text-slate-400 border-white/5 hover:bg-slate-700',
+                    ].join(' ')}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Camera Device Switcher (if multiple cameras exist) */}
+              {availableCameras.length > 1 && (
+                <div className="mt-1 flex flex-col gap-1">
+                  <label className="text-[11px] text-slate-400">Switch Camera Source</label>
+                  <select
+                    value={activeCamId}
+                    onChange={e => handleSwitchCamera(e.target.value)}
+                    className="w-full bg-slate-800 border border-white/10 text-white text-xs rounded-xl p-2 focus:outline-none focus:border-amber-400"
+                  >
+                    <option value="">Auto / Default Camera</option>
+                    {availableCameras.map((cam, idx) => (
+                      <option key={cam.deviceId || idx} value={cam.deviceId}>
+                        {cam.label || `Camera ${idx + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <p className="text-[10px] text-slate-400 truncate">
+                Active: {cameraInfo.label || 'Default Camera'}
+              </p>
             </div>
 
             {/* Footer Buttons */}

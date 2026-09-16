@@ -25,12 +25,14 @@ import {
 import CameraFeed from './components/CameraFeed.jsx'
 import ARScene from './components/ARScene.jsx'
 import MarkerARScene from './components/MarkerARScene.jsx'
+import ElephantStudioAR from './components/ElephantStudioAR.jsx'
 import MarkerCard from './components/MarkerCard.jsx'
 import SettingsModal from './components/SettingsModal.jsx'
 import './App.css'
 
 const ASSETS = [
-  { id: 'marker_elephant', title: 'Marker AR 🆕', Icon: ScanLine, iconColor: 'text-amber-300', url: null, baseScale: 1.0, style: 'marker', styleLabel: 'Print & Scan Marker' },
+  { id: 'studio_elephant', title: 'Elephant AR Studio 🎮', Icon: Footprints, iconColor: 'text-amber-400', url: 'assets/Elephant_Turn_Walk.glb', baseScale: 1.0, style: 'studio', styleLabel: 'Fixed Camera • Unity 3D Controls (No Marker)' },
+  { id: 'marker_elephant', title: 'Floor Marker AR 📌', Icon: ScanLine, iconColor: 'text-amber-300', url: null, baseScale: 1.0, style: 'marker', styleLabel: 'Print & Scan Floor Marker' },
   { id: 'apple', title: 'Apple Catcher', Icon: Apple, iconColor: 'text-red-500', url: 'assets/apple.glb', baseScale: 0.45, style: 'palm', styleLabel: 'Basket Palm' },
   { id: 'spot_shower', title: 'Spot Shower Mode', Icon: CloudRain, iconColor: 'text-cyan-400', url: null, baseScale: 1.0, style: 'ground_spot', styleLabel: 'Ground Spot Zone' },
   { id: 'elephant', title: 'Safari Elephant', Icon: Footprints, iconColor: 'text-emerald-400', url: 'assets/Elephant_Turn_Walk.glb', baseScale: 0.8, style: 'ground_spot', styleLabel: 'Ground Spot AR' },
@@ -247,6 +249,8 @@ export default function App() {
 
   const isCameraLive = status === STATUS.REQUESTING || status === STATUS.ACTIVE
   const isMarkerMode = asset?.id === 'marker_elephant'
+  const isStudioMode = asset?.id === 'studio_elephant'
+  const isCustomSceneMode = isMarkerMode || isStudioMode
   const hasHand = handResults?.multiHandLandmarks && handResults.multiHandLandmarks.length > 0
 
   // Show printable card overlay
@@ -256,16 +260,28 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-[100dvh] overflow-hidden bg-[radial-gradient(circle_at_center,#1b203a_0%,#0c0f1d_100%)]">
+      {/* Elephant Studio AR Mode — Fixed camera with Unity 3D Inspector & Gizmo */}
+      {isCameraLive && isStudioMode && (
+        <ElephantStudioAR
+          onExit={handleExit}
+          isMuted={isMuted}
+          selectedCamera={selectedCamera}
+          cameraResolution={cameraResolution}
+        />
+      )}
+
       {/* MindAR Marker Mode — MindAR owns the camera & canvas entirely */}
       {isCameraLive && isMarkerMode && (
         <MarkerARScene
           onExit={handleExit}
           isMuted={isMuted}
+          selectedCamera={selectedCamera}
+          cameraResolution={cameraResolution}
         />
       )}
 
       {/* Standard R3F modes — camera feed + Three.js canvas */}
-      {isCameraLive && !isMarkerMode && (
+      {isCameraLive && !isCustomSceneMode && (
         <>
           <CameraFeed
             ref={videoRef}
@@ -342,25 +358,39 @@ export default function App() {
               {ASSETS.map((ast, idx) => {
                 const ModeIcon = ast.Icon
                 const isMarkerEntry = ast.id === 'marker_elephant'
+                const isStudioEntry = ast.id === 'studio_elephant'
                 return (
                   <div
                     key={ast.id}
                     className={`glass-panel p-4 rounded-[22px] border flex items-center justify-between gap-4 transition-all hover:bg-slate-900/90 shadow-lg ${
-                      isMarkerEntry
+                      isStudioEntry
+                        ? 'border-amber-400/80 bg-gradient-to-r from-amber-950/40 via-slate-900/90 to-amber-900/30 hover:border-amber-300 shadow-[0_0_25px_rgba(245,158,11,0.25)] ring-1 ring-amber-400/30'
+                        : isMarkerEntry
                         ? 'border-amber-400/60 bg-gradient-to-r from-amber-950/40 to-orange-950/30 hover:border-amber-300'
                         : 'border-white/10 hover:border-amber-400/50'
                     }`}
                   >
                     <div className="flex items-center gap-3 text-left">
                       <div className={`w-10 h-10 rounded-2xl border flex items-center justify-center shrink-0 ${
-                        isMarkerEntry ? 'bg-amber-900/60 border-amber-500/50' : 'bg-slate-800/90 border-slate-700/80'
+                        isStudioEntry
+                          ? 'bg-amber-400 text-slate-950 border-amber-300 font-black shadow-md'
+                          : isMarkerEntry
+                          ? 'bg-amber-900/60 border-amber-500/50'
+                          : 'bg-slate-800/90 border-slate-700/80'
                       }`}>
-                        <ModeIcon className={`w-5 h-5 ${ast.iconColor}`} />
+                        <ModeIcon className={`w-5 h-5 ${isStudioEntry ? 'text-slate-950' : ast.iconColor}`} />
                       </div>
                       <div className="flex flex-col">
-                        <span className="text-[15px] font-black text-amber-300">
-                          {ast.title}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[15px] font-black text-amber-300">
+                            {ast.title}
+                          </span>
+                          {isStudioEntry && (
+                            <span className="bg-emerald-500/20 text-emerald-300 text-[9px] font-black px-1.5 py-0.5 rounded-full border border-emerald-400/40">
+                              NO MARKER
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[11px] text-slate-400 mono">
                           {ast.styleLabel || 'Interactive AR'}
                         </span>
@@ -391,7 +421,7 @@ export default function App() {
                           handleStart()
                         }}
                       >
-                        <Play className="w-3.5 h-3.5 fill-current" /> {isMarkerEntry ? 'SCAN' : 'PLAY'}
+                        <Play className="w-3.5 h-3.5 fill-current" /> {isStudioEntry ? 'STUDIO' : isMarkerEntry ? 'SCAN' : 'PLAY'}
                       </button>
                     </div>
                   </div>
@@ -402,16 +432,16 @@ export default function App() {
         </div>
       )}
 
-      {/* CAMERA REQUESTING STATE — hidden for marker mode */}
-      {status === STATUS.REQUESTING && !isMarkerMode && (
+      {/* CAMERA REQUESTING STATE — hidden for marker & studio modes */}
+      {status === STATUS.REQUESTING && !isCustomSceneMode && (
         <div className="relative z-10 h-full flex flex-col items-center justify-center gap-4 p-6 text-center bg-slate-950/90 backdrop-blur-xl">
           <div className="w-6 h-6 rounded-full bg-amber-400 animate-ping shadow-[0_0_20px_rgba(245,158,11,0.8)]" />
           <p className="mono text-slate-200 font-bold">Getting camera magic ready...</p>
         </div>
       )}
 
-      {/* ACTIVE CAMERA AR HUD — hidden in marker mode (MarkerARScene has its own HUD) */}
-      {status === STATUS.ACTIVE && !isMarkerMode && (
+      {/* ACTIVE CAMERA AR HUD — hidden in marker & studio modes (they own their HUDs) */}
+      {status === STATUS.ACTIVE && !isCustomSceneMode && (
         <>
           {/* UNIFIED TOP GLASS HUD NAVBAR */}
           <div className="fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-slate-950/80 backdrop-blur-xl border-b border-white/10 shadow-lg gap-2">
