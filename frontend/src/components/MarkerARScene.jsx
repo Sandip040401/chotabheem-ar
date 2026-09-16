@@ -678,34 +678,37 @@ export default function MarkerARScene({ onExit }) {
             <div>
               {!isPositionLocked ? (
                 <button
+                  id="btn-fix-position"
                   onClick={handleFixPosition}
                   disabled={!canFixPosition}
                   className={[
-                    'w-full py-3.5 px-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2.5 transition-all duration-300 shadow-xl',
+                    'w-full py-3.5 px-4 rounded-2xl font-black text-sm flex flex-col items-center justify-center gap-1 transition-all duration-300 shadow-xl',
                     canFixPosition
-                      ? 'bg-gradient-to-r from-amber-400 via-amber-300 to-emerald-400 text-slate-950 shadow-[0_0_25px_rgba(245,158,11,0.5)] hover:scale-[1.02] active:scale-[0.98]'
-                      : 'bg-slate-800/80 text-slate-500 border border-white/5 cursor-not-allowed',
+                      ? 'bg-gradient-to-r from-amber-400 via-amber-300 to-emerald-400 text-slate-950 shadow-[0_0_30px_rgba(245,158,11,0.6)] hover:scale-[1.02] active:scale-[0.98]'
+                      : 'bg-slate-800/90 text-slate-400 border border-white/10 opacity-75',
                   ].join(' ')}
                 >
-                  <Lock className="w-4 h-4" />
-                  <span>
-                    {canFixPosition
-                      ? '📌 FIX POSITION ON FLOOR'
-                      : 'POINT CAMERA AT MARKER TO FIX'}
+                  <div className="flex items-center gap-2 text-sm font-black">
+                    <Lock className="w-4 h-4" />
+                    <span>{canFixPosition ? '📌 CLICK TO FIX / LOCK POSITION' : '🔒 FIX / LOCK POSITION'}</span>
+                  </div>
+                  <span className="text-[11px] font-semibold opacity-85">
+                    {canFixPosition ? 'Marker detected! Tap to freeze AR on floor' : 'Point camera at marker first to activate'}
                   </span>
                 </button>
               ) : (
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-emerald-500/15 border border-emerald-400/40 rounded-2xl py-2.5 px-3 flex items-center justify-center gap-2 text-emerald-300 text-xs font-black">
-                    <Check className="w-4 h-4 text-emerald-400" />
-                    <span>POSITION FIXED & IMMUNE TO OCCLUSION</span>
+                  <div className="flex-1 bg-emerald-500/20 border border-emerald-400/50 rounded-2xl py-2.5 px-3 flex items-center justify-center gap-2 text-emerald-300 text-xs font-black shadow-lg">
+                    <Check className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                    <span>🔒 POSITION FIXED (IMMUNE TO OCCLUSION)</span>
                   </div>
                   <button
+                    id="btn-unlock-position"
                     onClick={handleUnlockPosition}
-                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 border border-white/10 px-3.5 py-2.5 rounded-2xl text-xs font-bold active:scale-95 transition-all flex items-center gap-1.5"
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-white/15 px-4 py-2.5 rounded-2xl text-xs font-black active:scale-95 transition-all flex items-center gap-1.5 shadow-md"
                     title="Unlock to re-track marker"
                   >
-                    <Unlock className="w-3.5 h-3.5" />
+                    <Unlock className="w-4 h-4 text-amber-400" />
                     <span>Unlock</span>
                   </button>
                 </div>
