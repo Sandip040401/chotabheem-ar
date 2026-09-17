@@ -623,6 +623,20 @@ export default function MarkerARScene({ onExit, selectedCamera, cameraResolution
             mixerRef.current.update(delta)
           }
 
+          // Locomotion: Dynamic circular walking patrol on the marker floor
+          if (elephantGroupRef.current && !lk.isLocked) {
+            const walkAngle = clock.getElapsedTime() * 0.65
+            const patrolR = 0.35 // patrol radius relative to marker
+            elephantGroupRef.current.position.x = Math.cos(walkAngle) * patrolR
+            elephantGroupRef.current.position.z = Math.sin(walkAngle) * patrolR
+            elephantGroupRef.current.rotation.y = -walkAngle + Math.PI / 2
+
+            if (shadowPlaneRef.current) {
+              shadowPlaneRef.current.position.x = elephantGroupRef.current.position.x
+              shadowPlaneRef.current.position.z = elephantGroupRef.current.position.z
+            }
+          }
+
           renderer.render(scene, camera)
         })
 

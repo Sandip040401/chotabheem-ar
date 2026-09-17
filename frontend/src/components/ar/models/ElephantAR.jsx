@@ -135,12 +135,23 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
     currentOpacityRef.current = THREE.MathUtils.lerp(currentOpacityRef.current,
       shouldShow ? (isConfiguringSpot ? 0.8 : 1.0) : 0, dt * 3.5)
 
-    // ── Apply transform — anchored at floor marker position ────
+    // ── Apply transform — anchored at floor marker position with circular locomotion ────
     const scale = currentScaleRef.current
+    const walkSpeed = cfg.walkSpeed ?? 0.25
+    const elapsedTime = state.clock.getElapsedTime()
+    const walkAngle = elapsedTime * (walkSpeed * 2.5)
+    
+    // Smooth circular patrol around center spot
+    const patrolRadius = Math.max(0.15, walkRadius * 0.45)
+    const currentPosX = centerX + Math.cos(walkAngle) * patrolRadius
+    const currentPosZ = centerZ + Math.sin(walkAngle) * patrolRadius
+    const headingAngle = -walkAngle + Math.PI / 2
+
     if (groupRef.current) {
-      groupRef.current.position.x = centerX
+      groupRef.current.position.x = currentPosX
       groupRef.current.position.y = -footYRef.current * scale
-      groupRef.current.position.z = centerZ
+      groupRef.current.position.z = currentPosZ
+      groupRef.current.rotation.y = headingAngle
       groupRef.current.scale.setScalar(scale)
 
       scene.traverse(child => {
@@ -154,9 +165,10 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
 
     // Shadow follows elephant on floor
     if (shadowRef.current) {
-      shadowRef.current.position.x    = centerX
+      shadowRef.current.position.x    = currentPosX
       shadowRef.current.position.y    = 0.002
-      shadowRef.current.position.z    = centerZ
+      shadowRef.current.position.z    = currentPosZ
+      shadowRef.current.rotation.z    = headingAngle
       shadowRef.current.scale.x       = scale * 1.6
       shadowRef.current.scale.z       = scale * 0.95
       shadowRef.current.material.opacity = currentOpacityRef.current * 0.5
@@ -164,14 +176,22 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
   })
 
   // POST-ANIMATION OVERRIDE (priority -1 = after mixer)
-  // Re-asserts position & grounding so residual bone offsets are fully locked on floor.
-  useFrame(() => {
+  // Re-asserts position & grounding along patrol circle
+  useFrame((state) => {
     if (!groupRef.current) return
-    const cfg    = spotPosRef?.current ?? {}
-    const scale  = currentScaleRef.current
-    groupRef.current.position.x = cfg.x ?? 0
+    const cfg          = spotPosRef?.current ?? {}
+    const scale        = currentScaleRef.current
+    const centerX      = cfg.x ?? 0
+    const centerZ      = cfg.z ?? 0
+    const walkRadius   = cfg.walkRadius ?? 1.0
+    const walkSpeed    = cfg.walkSpeed ?? 0.25
+    const walkAngle    = state.clock.getElapsedTime() * (walkSpeed * 2.5)
+    const patrolRadius = Math.max(0.15, walkRadius * 0.45)
+
+    groupRef.current.position.x = centerX + Math.cos(walkAngle) * patrolRadius
     groupRef.current.position.y = -footYRef.current * scale
-    groupRef.current.position.z = cfg.z ?? 0
+    groupRef.current.position.z = centerZ + Math.sin(walkAngle) * patrolRadius
+    groupRef.current.rotation.y = -walkAngle + Math.PI / 2
   }, -1)
 
   // ── Render-time bounds for marker circle visual ────────────

@@ -50,6 +50,8 @@ const DEFAULT_CONFIG = {
   shadowOpacity: 0.65,
   lightIntensity: 2.2,
   animSpeed: 0.95,
+  walkMode: 'roam',     // 'roam' (circle patrol) | 'walkToTap' (walk to tap destination) | 'inplace' (stay in spot)
+  roamRadius: 0.75,     // Radius of circle patrol on floor (meters)
   soundEnabled: true,
   isLocked: false,
 }
@@ -70,6 +72,8 @@ function loadSavedConfig() {
         shadowOpacity: typeof p.shadowOpacity === 'number' ? p.shadowOpacity : DEFAULT_CONFIG.shadowOpacity,
         lightIntensity: typeof p.lightIntensity === 'number' ? p.lightIntensity : DEFAULT_CONFIG.lightIntensity,
         animSpeed: typeof p.animSpeed === 'number' ? p.animSpeed : DEFAULT_CONFIG.animSpeed,
+        walkMode: typeof p.walkMode === 'string' ? p.walkMode : DEFAULT_CONFIG.walkMode,
+        roamRadius: typeof p.roamRadius === 'number' ? p.roamRadius : DEFAULT_CONFIG.roamRadius,
         soundEnabled: typeof p.soundEnabled === 'boolean' ? p.soundEnabled : DEFAULT_CONFIG.soundEnabled,
         isLocked: !!p.isLocked,
       }
@@ -175,6 +179,8 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
   const [soundEnabled, setSoundEnabled]     = useState(initial.soundEnabled)
   const [isLocked, setIsLocked]             = useState(initial.isLocked)
   const [showGroundGrid, setShowGroundGrid] = useState(false)
+  const [walkMode, setWalkMode]             = useState(initial.walkMode || 'roam') // 'roam' | 'walkToTap' | 'inplace'
+  const [roamRadius, setRoamRadius]         = useState(initial.roamRadius || 0.75) // Radius in meters
 
   // ── UI & Mode States ───────────────────────────────────────────────────────
   const [activeTab, setActiveTab]       = useState('placement') // 'placement' | 'scale' | 'camera'
@@ -209,6 +215,20 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
   const pinchStartDistRef    = useRef(null)
   const pinchStartHeightRef  = useRef(1.4)
   const nudgeIntervalRef     = useRef(null)
+
+  // Locomotion Live Refs for RAF animation loop
+  const walkModeRef          = useRef(initial.walkMode || 'roam')
+  const roamRadiusRef        = useRef(initial.roamRadius || 0.75)
+  const roamAngleRef         = useRef(0.0)
+  const targetFloorPosRef    = useRef({ x: initial.posX, z: initial.posZ, active: false })
+  const animParamsRef        = useRef({
+    posX: initial.posX,
+    posZ: initial.posZ,
+    rotY: initial.rotY,
+    animSpeed: initial.animSpeed,
+    isPlayingAnim: true,
+    isLocked: initial.isLocked,
+  })
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg)
@@ -265,6 +285,17 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     applyTransforms(posX, posZ, rotY, heightMeters, feetOffset)
     applyCameraCalibration(cameraHeight, cameraPitch)
 
+    walkModeRef.current = walkMode
+    roamRadiusRef.current = roamRadius
+    animParamsRef.current = {
+      posX,
+      posZ,
+      rotY,
+      animSpeed,
+      isPlayingAnim,
+      isLocked,
+    }
+
     saveConfig({
       posX, posZ,
       rotY,
@@ -275,12 +306,14 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
       shadowOpacity,
       lightIntensity,
       animSpeed,
+      walkMode,
+      roamRadius,
       soundEnabled,
       isLocked,
     })
-  }, [posX, posZ, rotY, heightMeters, feetOffset, cameraHeight, cameraPitch, shadowOpacity, lightIntensity, animSpeed, soundEnabled, isLocked, applyTransforms, applyCameraCalibration])
+  }, [posX, posZ, rotY, heightMeters, feetOffset, cameraHeight, cameraPitch, shadowOpacity, lightIntensity, animSpeed, walkMode, roamRadius, soundEnabled, isPlayingAnim, isLocked, applyTransforms, applyCameraCalibration])
 
-  // Sync lighting & shadow
+  // Sync lighting, shadow, ground grid & target reticle
   useEffect(() => {
     if (shadowPlaneRef.current) {
       shadowPlaneRef.current.material.opacity = shadowOpacity
@@ -291,7 +324,14 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     if (gridHelperRef.current) {
       gridHelperRef.current.visible = showGroundGrid && !isExhibitionMode
     }
-  }, [shadowOpacity, lightIntensity, showGroundGrid, isExhibitionMode])
+    if (targetReticleRef.current) {
+      // Yellow circle is NEVER shown in Show Mode or when AR is Locked
+      targetReticleRef.current.visible = !isExhibitionMode && !isLocked
+    }
+    if (groundWaveRef.current && isExhibitionMode) {
+      groundWaveRef.current.visible = false
+    }
+  }, [shadowOpacity, lightIntensity, showGroundGrid, isExhibitionMode, isLocked])
 
   // Sync animation
   useEffect(() => {
@@ -407,9 +447,11 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     scene.add(keyLight)
     characterLightRef.current = keyLight
 
-    // Ground Helper Grid at Y = 0
-    const grid = new THREE.GridHelper(12, 24, 0xf59e0b, 0x334155)
-    grid.position.y = 0.001
+    // Ground Helper Grid at Y = 0 (Vibrant, high-contrast floor grid)
+    const grid = new THREE.GridHelper(16, 32, 0xf59e0b, 0x00e5ff)
+    grid.position.set(0, 0.001, -3.0) // Positioned directly in front of camera over visible floor
+    grid.material.transparent = true
+    grid.material.opacity = 0.85
     grid.visible = false
     scene.add(grid)
     gridHelperRef.current = grid
@@ -420,6 +462,7 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     const reticle = new THREE.Mesh(ringGeo, ringMat)
     reticle.rotation.x = -Math.PI / 2
     reticle.position.set(initial.posX, 0.003, initial.posZ)
+    reticle.visible = !initial.isLocked
     scene.add(reticle)
     targetReticleRef.current = reticle
 
@@ -522,8 +565,53 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
         mixerRef.current.update(delta)
       }
 
-      // Animate reticle pulse
-      if (targetReticleRef.current) {
+      // Locomotion floor movement
+      const params = animParamsRef.current
+      const curMode = walkModeRef.current
+      const group = elephantGroupRef.current
+
+      if (group && params.isPlayingAnim) {
+        if (curMode === 'roam' && !params.isLocked) {
+          // Circle Roam on Floor: Elephant actively walks along floor in a circle
+          const r = roamRadiusRef.current || 0.85
+          roamAngleRef.current += delta * 0.75 * params.animSpeed
+          const targetX = params.posX + Math.cos(roamAngleRef.current) * r
+          const targetZ = params.posZ + Math.sin(roamAngleRef.current) * (r * 0.8)
+          const headingDeg = THREE.MathUtils.radToDeg(-roamAngleRef.current + Math.PI / 2)
+          group.position.set(targetX, 0, targetZ)
+          group.rotation.y = THREE.MathUtils.degToRad(headingDeg)
+        } else if (curMode === 'walkToTap') {
+          // Walk across floor directly to user-tapped destination
+          const target = targetFloorPosRef.current
+          if (target.active) {
+            const dx = target.x - group.position.x
+            const dz = target.z - group.position.z
+            const dist = Math.hypot(dx, dz)
+            if (dist > 0.06) {
+              const moveStep = Math.min(dist, 1.2 * params.animSpeed * delta)
+              group.position.x += (dx / dist) * moveStep
+              group.position.z += (dz / dist) * moveStep
+              const targetRot = Math.atan2(dx, dz)
+              group.rotation.y = THREE.MathUtils.lerp(group.rotation.y, targetRot, 0.18)
+            } else {
+              target.active = false
+            }
+          }
+        } else if (!params.isLocked) {
+          // In-Place Stationary Walking
+          group.position.set(params.posX, 0, params.posZ)
+          group.rotation.y = THREE.MathUtils.degToRad(params.rotY)
+        }
+
+        // Keep dynamic contact shadow directly underneath the moving elephant
+        if (shadowPlaneRef.current) {
+          shadowPlaneRef.current.position.x = group.position.x
+          shadowPlaneRef.current.position.z = group.position.z
+        }
+      }
+
+      // Animate reticle pulse only when visible
+      if (targetReticleRef.current && targetReticleRef.current.visible) {
         const p = Math.sin(clock.getElapsedTime() * 3) * 0.06 + 1.0
         targetReticleRef.current.scale.set(p, p, 1)
       }
@@ -607,6 +695,11 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
       setPosX(pt.x)
       setPosZ(pt.z)
       triggerGroundWave(pt.x, pt.z)
+
+      if (walkModeRef.current === 'walkToTap') {
+        targetFloorPosRef.current = { x: pt.x, z: pt.z, active: true }
+      }
+
       if (targetReticleRef.current) {
         targetReticleRef.current.position.set(pt.x, 0.003, pt.z)
       }
@@ -617,7 +710,7 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     if (e.target.closest('.studio-interactive')) return
 
     const pt = raycastGroundPoint(e.clientX, e.clientY)
-    if (pt && targetReticleRef.current) {
+    if (pt && targetReticleRef.current && !isLocked && !isExhibitionMode) {
       targetReticleRef.current.position.set(pt.x, 0.003, pt.z)
     }
 
@@ -744,6 +837,19 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
 
     if (soundEnabled) playAudioEffect('shutter')
 
+    // Temporarily hide editor helpers for pristine snapshot
+    const gridPrev = gridHelperRef.current ? gridHelperRef.current.visible : false
+    const reticlePrev = targetReticleRef.current ? targetReticleRef.current.visible : false
+    const wavePrev = groundWaveRef.current ? groundWaveRef.current.visible : false
+
+    if (gridHelperRef.current) gridHelperRef.current.visible = false
+    if (targetReticleRef.current) targetReticleRef.current.visible = false
+    if (groundWaveRef.current) groundWaveRef.current.visible = false
+
+    if (rendererRef.current && sceneRef.current && cameraRef.current) {
+      rendererRef.current.render(sceneRef.current, cameraRef.current)
+    }
+
     const snapCanvas = document.createElement('canvas')
     snapCanvas.width = canvas3D.width
     snapCanvas.height = canvas3D.height
@@ -752,8 +858,13 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
     // 1. Draw camera video frame
     ctx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height)
 
-    // 2. Draw 3D WebGL render layer on top
+    // 2. Draw clean 3D WebGL render layer on top
     ctx.drawImage(canvas3D, 0, 0, snapCanvas.width, snapCanvas.height)
+
+    // Restore editor helper visibility
+    if (gridHelperRef.current) gridHelperRef.current.visible = gridPrev
+    if (targetReticleRef.current) targetReticleRef.current.visible = reticlePrev
+    if (groundWaveRef.current) groundWaveRef.current.visible = wavePrev
 
     // 3. Watermark badge with timestamp
     const now = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -987,10 +1098,92 @@ export default function ElephantStudioAR({ onExit, selectedCamera, cameraResolut
             {/* ── TAB 1: PLACEMENT & MOVEMENT ─────────────────────────────── */}
             {activeTab === 'placement' && (
               <div className="flex flex-col gap-2.5">
+                {/* Locomotion Movement Mode Selector */}
+                <div className="bg-slate-950/70 border border-white/10 rounded-2xl p-2.5 flex flex-col gap-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-black text-amber-300 flex items-center gap-1">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" /> Walking Movement
+                    </span>
+                    <span className="font-mono text-[10px] text-amber-400 font-bold uppercase">{walkMode}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    <button
+                      onClick={() => {
+                        setWalkMode('roam')
+                        showToast('🔄 Circle Roam: Elephant walks in a circle on floor')
+                      }}
+                      className={[
+                        'py-2 px-1 rounded-xl text-[10px] font-black transition-all flex flex-col items-center gap-0.5 border',
+                        walkMode === 'roam'
+                          ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-md font-black'
+                          : 'bg-slate-800 text-slate-300 border-white/5 hover:bg-slate-700',
+                      ].join(' ')}
+                    >
+                      <span>🔄 Circle Roam</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setWalkMode('walkToTap')
+                        showToast('🎯 Walk to Tap: Tap any spot on floor to walk there')
+                      }}
+                      className={[
+                        'py-2 px-1 rounded-xl text-[10px] font-black transition-all flex flex-col items-center gap-0.5 border',
+                        walkMode === 'walkToTap'
+                          ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-md font-black'
+                          : 'bg-slate-800 text-slate-300 border-white/5 hover:bg-slate-700',
+                      ].join(' ')}
+                    >
+                      <span>🎯 Walk to Tap</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setWalkMode('inplace')
+                        showToast('🚶 In-Place: Stationary walk in spot')
+                      }}
+                      className={[
+                        'py-2 px-1 rounded-xl text-[10px] font-black transition-all flex flex-col items-center gap-0.5 border',
+                        walkMode === 'inplace'
+                          ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-md font-black'
+                          : 'bg-slate-800 text-slate-300 border-white/5 hover:bg-slate-700',
+                      ].join(' ')}
+                    >
+                      <span>🚶 In-Place</span>
+                    </button>
+                  </div>
+
+                  {/* Roam Radius Stepper (only visible when in roam mode) */}
+                  {walkMode === 'roam' && (
+                    <div className="flex items-center justify-between pt-1 border-t border-white/10 text-[10px]">
+                      <span className="text-slate-400 font-bold">Patrol Radius:</span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => nudge(setRoamRadius, -0.15)}
+                          className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold"
+                          title="Smaller circle"
+                        >
+                          -15cm
+                        </button>
+                        <span className="font-mono text-emerald-400 font-bold">{roamRadius.toFixed(2)}m</span>
+                        <button
+                          onClick={() => nudge(setRoamRadius, 0.15)}
+                          className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold"
+                          title="Larger circle"
+                        >
+                          +15cm
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Tap-to-Place Banner */}
                 <div className="bg-amber-500/15 border border-amber-400/30 rounded-2xl p-2.5 flex items-center gap-2 text-amber-300 text-[11px] font-bold">
                   <Crosshair className="w-4 h-4 text-amber-400 shrink-0 animate-spin" style={{ animationDuration: '6s' }} />
-                  <span>Tap anywhere on your floor to place elephant directly there!</span>
+                  <span>
+                    {walkMode === 'walkToTap'
+                      ? 'Tap anywhere on floor — Elephant will walk there!'
+                      : 'Tap anywhere on your floor to reposition elephant directly!'}
+                  </span>
                 </div>
 
                 {/* Distance on Floor (Closer / Farther) */}
