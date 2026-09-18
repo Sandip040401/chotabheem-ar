@@ -5,6 +5,8 @@ import * as THREE from 'three'
 
 // Butter-Smooth 60 FPS 3D Ground Spot Marker
 export function GroundSpotMarker({ spotPosRef, isConfiguringSpot, isTriggered }) {
+  if (!isConfiguringSpot) return null
+
   const groupRef = useRef()
   const meshRef = useRef()
   const ringRef = useRef()
@@ -258,7 +260,7 @@ export function GroundSpotDetector({
 
   // Fast 16x16 video frame sampling
   useEffect(() => {
-    if (asset?.id !== 'spot_shower' && asset?.id !== 'elephant') return
+    if (asset?.id !== 'spot_shower' && asset?.id !== 'elephant' && asset?.id !== 'bird') return
 
     const canvas = document.createElement('canvas')
     canvas.width = 16
@@ -356,13 +358,13 @@ export function GroundSpotDetector({
   }, [asset?.id, isConfiguringSpot, videoRef, viewport, spotPosRef])
 
   useFrame((state) => {
-    if (asset?.id !== 'spot_shower' && asset?.id !== 'elephant') return
+    if (asset?.id !== 'spot_shower' && asset?.id !== 'elephant' && asset?.id !== 'bird') return
 
     // ── Update cached screen position of trigger zone ────────
     const spotX = spotPosRef?.current?.x || 0
     const spotZ = spotPosRef?.current?.z || 0
 
-    if (asset?.id === 'elephant') {
+    if (asset?.id === 'elephant' || asset?.id === 'bird') {
       // Floor mode: project XZ world position [spotX, 0, spotZ] using camera
       const worldPt = new THREE.Vector3(spotX, 0, spotZ)
       worldPt.project(state.camera)

@@ -10,6 +10,7 @@ const ROOT_BONE = 'elep_4_Root_M'
 // Floor Spot Ring Visual — flat circle on XZ floor plane (y≈0)
 // ─────────────────────────────────────────────────────────────
 function SpotCircleBoundary({ centerX, centerZ, radius, isConfiguringSpot, isActive }) {
+  if (!isConfiguringSpot) return null
   const circleRef = useRef()
 
   useFrame((state) => {
@@ -130,10 +131,8 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
     // ── Target scale fitting inside marker circle ──────────────
     const modelScale = Math.min(1.4, walkRadius * 0.48 * elephantSize)
 
-    currentScaleRef.current   = THREE.MathUtils.lerp(currentScaleRef.current,
-      shouldShow ? modelScale : 0, dt * 3.5)
-    currentOpacityRef.current = THREE.MathUtils.lerp(currentOpacityRef.current,
-      shouldShow ? (isConfiguringSpot ? 0.8 : 1.0) : 0, dt * 3.5)
+    currentScaleRef.current   = THREE.MathUtils.lerp(currentScaleRef.current, modelScale, dt * 3.5)
+    currentOpacityRef.current = THREE.MathUtils.lerp(currentOpacityRef.current, 1.0, dt * 3.5)
 
     // ── Apply transform — anchored at floor marker position with circular locomotion ────
     const scale = currentScaleRef.current
@@ -163,16 +162,7 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
       })
     }
 
-    // Shadow follows elephant on floor
-    if (shadowRef.current) {
-      shadowRef.current.position.x    = currentPosX
-      shadowRef.current.position.y    = 0.002
-      shadowRef.current.position.z    = currentPosZ
-      shadowRef.current.rotation.z    = headingAngle
-      shadowRef.current.scale.x       = scale * 1.6
-      shadowRef.current.scale.z       = scale * 0.95
-      shadowRef.current.material.opacity = currentOpacityRef.current * 0.5
-    }
+
   })
 
   // POST-ANIMATION OVERRIDE (priority -1 = after mixer)
@@ -210,17 +200,6 @@ export default function ElephantAR({ spotPosRef, isTriggered, isConfiguringSpot 
         isConfiguringSpot={isConfiguringSpot}
         isActive={isActiveRef.current}
       />
-
-      {/* Soft blob shadow under elephant (on floor) */}
-      <mesh
-        ref={shadowRef}
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, 0.002, centerZ]}
-        receiveShadow
-      >
-        <planeGeometry args={[1, 0.45]} />
-        <meshBasicMaterial color="#000305" transparent opacity={0} depthWrite={false} />
-      </mesh>
 
       {/* Shadow-catcher plane — receives elephant shadow from directional light */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.001, centerZ]} receiveShadow>

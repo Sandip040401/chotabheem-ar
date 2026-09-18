@@ -12,17 +12,21 @@ import FloatingApples from './ar/games/FloatingApples.jsx'
 import NinjaApples from './ar/games/NinjaApples.jsx'
 import { GroundSpotMarker, SpotAppleShower, GroundSpotDetector } from './ar/games/SpotShowerMode.jsx'
 import ElephantAR from './ar/models/ElephantAR.jsx'
+import BirdAR from './ar/models/BirdAR.jsx'
 
 import HandParticleBurst from './ar/effects/HandParticleBurst.jsx'
 
 // ─────────────────────────────────────────────────────────────
-// Camera manager — tilts camera downward in elephant floor mode
+// Camera manager — tilts camera downward in elephant / bird floor mode
 // ─────────────────────────────────────────────────────────────
 function CameraManager({ assetId }) {
   const { camera } = useThree()
   useEffect(() => {
     if (assetId === 'elephant') {
       camera.position.set(0, 1.8, 5)
+      camera.fov = 55
+    } else if (assetId === 'bird') {
+      camera.position.set(0, 1.9, 5.2)
       camera.fov = 55
     } else {
       camera.position.set(0, 0, 4)
@@ -83,6 +87,8 @@ function FloorPickerPlane({ isConfiguringSpot, spotPosRef, onUpdateSpotConfig })
 // Flat floor spot marker (for elephant XZ floor mode)
 // ─────────────────────────────────────────────────────────────
 function FloorSpotMarker({ spotPosRef, isConfiguringSpot, isTriggered }) {
+  if (!isConfiguringSpot) return null
+
   const groupRef  = useRef()
   const ringRef   = useRef()
   const waveRef   = useRef()
@@ -200,7 +206,7 @@ function AnchorRig({ asset, transform, handResults, basketPosRef, swordPosRef, s
     }
   })
 
-  if (asset?.id === 'spot_shower' || asset?.id === 'elephant') return null
+  if (asset?.id === 'spot_shower' || asset?.id === 'elephant' || asset?.id === 'bird') return null
 
   return (
     <group ref={group}>
@@ -236,7 +242,7 @@ export default function ARScene({
   const gesture       = useRef({ mode: null, lastX: 0, lastY: 0, lastDist: 0 })
   const containerRef  = useRef(null)
   const [, forceRender] = useState(0)
-  const isFloorMode   = asset?.id === 'elephant'
+  const isFloorMode   = asset?.id === 'elephant' || asset?.id === 'bird'
 
   const spotPosRef = useRef({
     x: spotConfig?.x || 0,
@@ -426,6 +432,39 @@ export default function ARScene({
             />
             {/* Elephant model on XZ floor */}
             <ElephantAR
+              spotPosRef={spotPosRef}
+              isTriggered={isSpotTriggered}
+              isConfiguringSpot={isConfiguringSpot}
+            />
+            {/* Invisible floor plane for tap-to-place in config mode */}
+            <FloorPickerPlane
+              isConfiguringSpot={isConfiguringSpot}
+              spotPosRef={spotPosRef}
+              onUpdateSpotConfig={onUpdateSpotConfig}
+            />
+            {/* Trigger zone detector */}
+            <GroundSpotDetector
+              spotPosRef={spotPosRef}
+              handResults={handResults}
+              isConfiguringSpot={isConfiguringSpot}
+              onSpotTriggerChange={onSpotTriggerChange}
+              asset={asset}
+              videoRef={videoRef}
+            />
+          </Suspense>
+        )}
+
+        {/* Flamingo Bird AR mode */}
+        {asset.id === 'bird' && (
+          <Suspense fallback={null}>
+            {/* Flat floor spot marker (XZ plane) */}
+            <FloorSpotMarker
+              spotPosRef={spotPosRef}
+              isConfiguringSpot={isConfiguringSpot}
+              isTriggered={isSpotTriggered}
+            />
+            {/* Flamingo Bird model in 3D flight */}
+            <BirdAR
               spotPosRef={spotPosRef}
               isTriggered={isSpotTriggered}
               isConfiguringSpot={isConfiguringSpot}

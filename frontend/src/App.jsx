@@ -21,6 +21,7 @@ import {
   Footprints,
   ScanLine,
   Printer,
+  Bird,
 } from 'lucide-react'
 import CameraFeed from './components/CameraFeed.jsx'
 import ARScene from './components/ARScene.jsx'
@@ -33,9 +34,10 @@ import './App.css'
 const ASSETS = [
   { id: 'studio_elephant', title: 'Elephant AR Studio 🎮', Icon: Footprints, iconColor: 'text-amber-400', url: 'assets/Elephant_Turn_Walk.glb', baseScale: 1.0, style: 'studio', styleLabel: 'Fixed Camera • Unity 3D Controls (No Marker)' },
   { id: 'marker_elephant', title: 'Floor Marker AR 📌', Icon: ScanLine, iconColor: 'text-amber-300', url: null, baseScale: 1.0, style: 'marker', styleLabel: 'Print & Scan Floor Marker' },
+  { id: 'elephant', title: 'Safari Elephant', Icon: Footprints, iconColor: 'text-emerald-400', url: 'assets/Elephant_Turn_Walk.glb', baseScale: 0.8, style: 'ground_spot', styleLabel: 'Ground Spot AR' },
+  { id: 'bird', title: 'Flying Flamingo 🦩', Icon: Bird, iconColor: 'text-pink-400', url: 'assets/Flamingo-Original.glb', baseScale: 0.8, style: 'ground_spot', styleLabel: 'Aerial Spot AR' },
   { id: 'apple', title: 'Apple Catcher', Icon: Apple, iconColor: 'text-red-500', url: 'assets/apple.glb', baseScale: 0.45, style: 'palm', styleLabel: 'Basket Palm' },
   { id: 'spot_shower', title: 'Spot Shower Mode', Icon: CloudRain, iconColor: 'text-cyan-400', url: null, baseScale: 1.0, style: 'ground_spot', styleLabel: 'Ground Spot Zone' },
-  { id: 'elephant', title: 'Safari Elephant', Icon: Footprints, iconColor: 'text-emerald-400', url: 'assets/Elephant_Turn_Walk.glb', baseScale: 0.8, style: 'ground_spot', styleLabel: 'Ground Spot AR' },
   { id: 'ninja', title: 'Fruit Ninja', Icon: Swords, iconColor: 'text-amber-400', url: null, baseScale: 0.8, style: 'grip', styleLabel: 'Katana Grip' },
   { id: 'ring', title: 'Diamond Ring', Icon: Sparkles, iconColor: 'text-yellow-300', url: null, baseScale: 0.8, style: 'finger', styleLabel: 'Finger Anchor' },
   { id: 'crystal', title: 'Mystic Crystal', Icon: Orbit, iconColor: 'text-purple-400', url: null, baseScale: 1.2, style: 'hover', styleLabel: 'Floating Anchor' },
@@ -184,10 +186,15 @@ export default function App() {
       const saved = localStorage.getItem('chotabheem_ground_spot')
       if (saved) return {
         walkRadius: 1.2, elephantScale: 1.0, walkSpeed: 0.20,
+        birdRadius: 1.4, birdAltitude: 1.2, birdScale: 0.8, birdSpeed: 0.35,
         ...JSON.parse(saved),
       }
     } catch (e) {}
-    return { x: 0, y: -0.6, radius: 0.7, walkRadius: 1.2, elephantScale: 1.0, walkSpeed: 0.20 }
+    return {
+      x: 0, y: -0.6, radius: 0.7,
+      walkRadius: 1.2, elephantScale: 1.0, walkSpeed: 0.20,
+      birdRadius: 1.4, birdAltitude: 1.2, birdScale: 0.8, birdSpeed: 0.35,
+    }
   })
   const [isConfiguringSpot, setIsConfiguringSpot] = useState(false)
   const [isSpotTriggered, setIsSpotTriggered] = useState(false)
@@ -482,7 +489,7 @@ export default function App() {
 
             {/* Controls: Config / Mute / Flip */}
             <div className="flex items-center gap-1.5">
-              {(asset.id === 'spot_shower' || asset.id === 'elephant') && (
+              {(asset.id === 'spot_shower' || asset.id === 'elephant' || asset.id === 'bird') && (
                 <button
                   className={`px-2.5 py-1 text-[11px] font-black tracking-wide rounded-[12px] transition-all border flex items-center gap-1 ${
                     isConfiguringSpot
@@ -527,12 +534,16 @@ export default function App() {
           </div>
 
           {/* TOP CONFIG DRAWER PANEL */}
-          {(asset.id === 'spot_shower' || asset.id === 'elephant') && isConfiguringSpot && (
+          {(asset.id === 'spot_shower' || asset.id === 'elephant' || asset.id === 'bird') && isConfiguringSpot && (
             <div className="fixed top-[52px] left-1/2 -translate-x-1/2 z-30 w-[94%] max-w-[440px] glass-panel px-4 py-3 rounded-[20px] shadow-2xl flex flex-col gap-2.5 border border-amber-400/50">
               <div className="flex justify-between items-center border-b border-white/10 pb-1.5">
                 <span className="text-[12px] font-black text-amber-300 flex items-center gap-1.5">
                   <Target className="w-4 h-4 text-amber-300 animate-pulse" />
-                  {asset.id === 'elephant' ? 'CONFIG ELEPHANT AR' : 'ALIGN FLOOR TRACKER'}
+                  {asset.id === 'elephant'
+                    ? 'CONFIG ELEPHANT AR'
+                    : asset.id === 'bird'
+                    ? 'CONFIG FLAMINGO AR'
+                    : 'ALIGN FLOOR TRACKER'}
                 </span>
                 <span className="text-[10px] text-slate-400 mono">
                   pos ({spotConfig.x.toFixed(1)}, {spotConfig.y.toFixed(1)})
@@ -542,9 +553,10 @@ export default function App() {
               <p className="text-[10px] text-slate-300 font-medium">
                 {asset.id === 'elephant'
                   ? '👣 Tap anywhere on the floor to position the trigger zone. Use sliders to configure.'
+                  : asset.id === 'bird'
+                  ? '🪶 Tap floor to position roost/anchor point. Configure flight radius, altitude & speed below.'
                   : '💡 Drag ring on screen to reposition. Use sliders to configure.'}
               </p>
-
 
               {/* ── Trigger zone radius ── */}
               <div className="flex items-center gap-3">
@@ -600,10 +612,70 @@ export default function App() {
                 </div>
               )}
 
+              {/* ── Flight Radius (bird only) ── */}
+              {asset.id === 'bird' && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] font-bold text-pink-300 w-32 shrink-0">
+                    Flight Radius: {(spotConfig.birdRadius || 1.4).toFixed(2)}m
+                  </span>
+                  <input type="range" min="0.5" max="3.0" step="0.05"
+                    value={spotConfig.birdRadius || 1.4}
+                    onChange={(e) => handleUpdateSpotConfig({ ...spotConfig, birdRadius: parseFloat(e.target.value) })}
+                    className="w-full accent-pink-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {/* ── Flight Altitude / Height (bird only) ── */}
+              {asset.id === 'bird' && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] font-bold text-cyan-300 w-32 shrink-0">
+                    Altitude: {(spotConfig.birdAltitude || 1.2).toFixed(2)}m
+                  </span>
+                  <input type="range" min="0.3" max="3.0" step="0.05"
+                    value={spotConfig.birdAltitude || 1.2}
+                    onChange={(e) => handleUpdateSpotConfig({ ...spotConfig, birdAltitude: parseFloat(e.target.value) })}
+                    className="w-full accent-cyan-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {/* ── Bird model size (bird only) ── */}
+              {asset.id === 'bird' && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] font-bold text-amber-300 w-32 shrink-0">
+                    Flamingo Size: {((spotConfig.birdScale || 0.8) * 100).toFixed(0)}%
+                  </span>
+                  <input type="range" min="0.2" max="2.5" step="0.05"
+                    value={spotConfig.birdScale || 0.8}
+                    onChange={(e) => handleUpdateSpotConfig({ ...spotConfig, birdScale: parseFloat(e.target.value) })}
+                    className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {/* ── Flight speed (bird only) ── */}
+              {asset.id === 'bird' && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[11px] font-bold text-violet-300 w-32 shrink-0">
+                    Flight Speed: {(spotConfig.birdSpeed || 0.35).toFixed(2)}
+                  </span>
+                  <input type="range" min="0.05" max="1.0" step="0.05"
+                    value={spotConfig.birdSpeed || 0.35}
+                    onChange={(e) => handleUpdateSpotConfig({ ...spotConfig, birdSpeed: parseFloat(e.target.value) })}
+                    className="w-full accent-violet-400 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+              )}
+
               <div className="flex gap-2 pt-1">
                 <button
                   className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-[11px] py-1.5 rounded-[12px] flex items-center justify-center gap-1"
-                  onClick={() => handleUpdateSpotConfig({ x: 0, y: 0, radius: 0.7, walkRadius: 1.2, elephantScale: 1.0, walkSpeed: 0.20 })}
+                  onClick={() => handleUpdateSpotConfig({
+                    x: 0, y: -0.6, radius: 0.7,
+                    walkRadius: 1.2, elephantScale: 1.0, walkSpeed: 0.20,
+                    birdRadius: 1.4, birdAltitude: 1.2, birdScale: 0.8, birdSpeed: 0.35,
+                  })}
                 >
                   <RotateCcw className="w-3 h-3" /> Reset Defaults
                 </button>
@@ -620,18 +692,30 @@ export default function App() {
           {/* FLOATING STATUS & SCORE HUD BADGE */}
           <div
             className={`fixed left-1/2 -translate-x-1/2 z-20 transition-all duration-200 ${
-              isConfiguringSpot ? 'top-[165px]' : 'top-[56px]'
+              isConfiguringSpot ? 'top-[210px]' : 'top-[56px]'
             }`}
           >
-            {(asset.id === 'spot_shower' || asset.id === 'elephant') && !isConfiguringSpot && (
+            {(asset.id === 'spot_shower' || asset.id === 'elephant' || asset.id === 'bird') && !isConfiguringSpot && (
               <div className="mb-1 text-center">
                 {isSpotTriggered ? (
-                  <div className="bg-gradient-to-r from-emerald-600 via-amber-500 to-emerald-600 border border-amber-300 text-white font-black text-[12px] px-4 py-1.5 rounded-full shadow-[0_0_20px_rgba(16,185,129,0.6)] animate-pulse flex items-center justify-center gap-1.5">
-                    <Zap className="w-4 h-4 text-amber-300 animate-bounce" /> {asset.id === 'elephant' ? 'SPOT TRIGGERED! SAFARI ELEPHANT REVEALED!' : 'SPOT TRIGGERED! APPLE SHOWER ACTIVE!'}
+                  <div className="bg-gradient-to-r from-emerald-600 via-amber-500 to-emerald-600 border border-amber-300 text-white font-black text-[12px] px-4 py-1.5 rounded-full shadow-[0_0_20px_rgba(16,185,129,0.6)] animate-pulse flex items-center justify-center gap-1.5 whitespace-nowrap">
+                    <Zap className="w-4 h-4 text-amber-300 animate-bounce" /> {
+                      asset.id === 'elephant'
+                        ? 'SPOT TRIGGERED! SAFARI ELEPHANT REVEALED!'
+                        : asset.id === 'bird'
+                        ? 'SPOT TRIGGERED! FLYING FLAMINGO IN FLIGHT!'
+                        : 'SPOT TRIGGERED! APPLE SHOWER ACTIVE!'
+                    }
                   </div>
                 ) : (
-                  <div className="glass-pill px-3 py-1 rounded-full text-cyan-300 font-bold text-[11px] border border-cyan-400/40 flex items-center justify-center gap-1.5">
-                    <Target className="w-3.5 h-3.5 text-cyan-300" /> {asset.id === 'elephant' ? 'Stand in marker spot to reveal Safari Elephant!' : 'Stand on physical floor spot to trigger Apple Shower!'}
+                  <div className="glass-pill px-3 py-1 rounded-full text-cyan-300 font-bold text-[11px] border border-cyan-400/40 flex items-center justify-center gap-1.5 whitespace-nowrap">
+                    <Target className="w-3.5 h-3.5 text-cyan-300" /> {
+                      asset.id === 'elephant'
+                        ? 'Stand in marker spot to reveal Safari Elephant!'
+                        : asset.id === 'bird'
+                        ? 'Stand in marker spot to awaken Flying Flamingo!'
+                        : 'Stand on physical floor spot to trigger Apple Shower!'
+                    }
                   </div>
                 )}
               </div>
